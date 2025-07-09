@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/s0w0h/yamlforge/blob/main/LICENSE"><img src="assets/GPL-3.0License.svg" alt="License"></a>
-  <a href="https://github.com/s0w0h/yamlforge/pulls"><img src="assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
+  <a href="https://github.com/somnifex/yamlforge/blob/main/LICENSE"><img src="assets/GPL-3.0License.svg" alt="License"></a>
+  <a href="https://github.com/somnifex/yamlforge/pulls"><img src="assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
 </p>
 
 ## YamlForge
@@ -32,7 +32,7 @@
 #### Docker (Recommended)
 
 ```bash
-docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key s0w0h/yamlforge:latest
+docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key utopeadia/yamlforge:latest
 ```
 
 `-e API_KEY=your_api_key` is used to set the API key. Multiple API keys can be separated by commas, for example, `-e API_KEY=key1,key2,key3`.
@@ -59,7 +59,7 @@ docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KE
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/s0w0h/yamlforge.git
+   git clone https://github.com/somnifex/yamlforge.git
    ```
 2. Install dependencies:
    ```bash
