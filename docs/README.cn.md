@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/s0w0h/yamlforge/blob/main/LICENSE"><img src="../assets/GPL-3.0License.svg" alt="License"></a>
-  <a href="https://github.com/s0w0h/yamlforge/pulls"><img src="../assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
+  <a href="https://github.com/somnifex/yamlforge/blob/main/LICENSE"><img src="../assets/GPL-3.0License.svg" alt="License"></a>
+  <a href="https://github.com/somnifex/yamlforge/pulls"><img src="../assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
 </p>
 
 **YamlForge** 是一个轻量级的工具，用于从 YAML 配置文件中提取信息并使用 JavaScript 脚本进行处理。
@@ -30,7 +30,7 @@
 #### Docker (推荐)
 
 ```bash
-docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key s0w0h/yamlforge:latest
+docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key utopeadia/yamlforge:latest
 ```
 
 `-e API_KEY=your_api_key`用于设置 API 密钥，可以使用逗号分隔多个 API 密钥，例如 -e API_KEY=key1,key2,key3。
@@ -39,7 +39,7 @@ docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KE
 
 1. 克隆仓库:
    ```bash
-   git clone https://github.com/s0w0h/yamlforge.git
+   git clone https://github.com/somnifex/yamlforge.git
    ```
 2. 修改 `Dockerfile`
    设置API_KEY
