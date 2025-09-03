@@ -262,9 +262,13 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     const fs = require('fs');
     const yaml = require('js-yaml');
     const iconv = require('iconv-lite');
-
     {js_code}
-
+    // 创建一个自定义 schema，继承自默认schema，移除了浮点数类型的隐式解析
+    const YAML_SCHEMA = yaml.DEFAULT_SCHEMA.extend({{
+        implicit: [
+            ...yaml.DEFAULT_SCHEMA.implicit.filter(tag => tag.tag !== 'tag:yaml.org,2002:float')
+        ]
+    }});
     function processYaml() {{
         const yamlInput = fs.readFileSync('{yaml_file_path}');
         let yamlStr = iconv.decode(yamlInput, 'utf-8');
@@ -272,13 +276,20 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
         if (yamlStr.charCodeAt(0) === 0xFEFF) {{
             yamlStr = yamlStr.slice(1);
         }}
-
-        const config = yaml.load(yamlStr);
+        // 使用自定义的 schema
+        const config = yaml.load(yamlStr, {{ schema: YAML_SCHEMA }});
+        
         const modifiedConfig = main(config);
-        const output = yaml.dump(modifiedConfig, {{ encoding: 'utf-8' }});
+        
+        // 不折叠长字符串，允许 unicode 字符
+        const output = yaml.dump(modifiedConfig, {{ 
+            encoding: 'utf-8',
+            noCompatMode: true,
+            lineWidth: -1, // 不自动换行
+            quotingType: '"' // 优先使用双引号
+        }});
         fs.writeFileSync('{temp_processed_yaml_path}', output, 'utf-8');
     }}
-
     processYaml();
     """
 
