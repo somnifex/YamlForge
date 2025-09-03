@@ -264,16 +264,6 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     const iconv = require('iconv-lite');
 
     {js_code}
-    var allImplicitTypes = yaml.DEFAULT_SCHEMA.implicit;
-
-    var filteredTypes = allImplicitTypes.filter(function(type) {{
-        return type.tag !== 'tag:yaml.org,2002:float';
-    }});
-
-    const YAML_SCHEMA_WITHOUT_FLOAT = yaml.DEFAULT_SCHEMA.extend({{
-        implicit: filteredTypes
-    }});
-    // --- End of Fix ---
 
     function processYaml() {{
         const yamlInput = fs.readFileSync('{yaml_file_path}');
@@ -283,16 +273,9 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
             yamlStr = yamlStr.slice(1);
         }}
 
-        const config = yaml.load(yamlStr, {{ schema: YAML_SCHEMA_WITHOUT_FLOAT }});
-        
+        const config = yaml.load(yamlStr);
         const modifiedConfig = main(config);
-        
-        const output = yaml.dump(modifiedConfig, {{ 
-            encoding: 'utf-8',
-            noCompatMode: true,
-            lineWidth: -1, // 不自动换行
-            quotingType: '"' // 优先使用双引号
-        }});
+        const output = yaml.dump(modifiedConfig, {{ encoding: 'utf-8' }});
         fs.writeFileSync('{temp_processed_yaml_path}', output, 'utf-8');
     }}
 
