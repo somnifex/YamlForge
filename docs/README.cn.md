@@ -128,6 +128,32 @@ JavaScript 脚本需要定义一个 `main` 函数，该函数接收一个 JSON �
 
 应用运行后，可以通过 `http://IP:19527` 访问一个简单的网页界面，实现了绝大部分功能。
 
+## 环境变量 / 配置
+
+应用的网络鲁棒性可以通过以下环境变量进行调整：
+
+| 变量名 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `API_KEY` | 允许的 API 密钥列表，用逗号分隔。 | `""` (空) |
+| `GUNICORN_TIMEOUT` | Gunicorn 工作进程超时时间（秒）。处理大文件或慢速操作时，请增加此值。 | `300` |
+| `DOWNLOAD_TIMEOUT` | 使用 `requests` 下载远程文件的超时时间（秒）。 | `600` |
+| `DNS_RESOLVER_TIMEOUT` | 单次 DNS 解析查询的超时时间（秒）。 | `5` |
+| `DNS_RESOLVER_LIFETIME` | DNS 解析尝试的总生存期（秒）。 | `10` |
+| `RETRY_BACKOFF_FACTOR` | 重试退避因子（线性延迟）。 | `1` |
+| `RETRY_TOTAL` | 网络请求的最大重试次数。 | `5` |
+| `MAX_WORKERS` | DNS 解析的并发线程数。 | `10` |
+
+### 示例用法 (Docker)
+
+```bash
+docker run -d -p 19527:19527 \
+  -e API_KEY="your-secret-key" \
+  -e GUNICORN_TIMEOUT=600 \
+  -e DOWNLOAD_TIMEOUT=1200 \
+  -e MAX_WORKERS=20 \
+  yamlforge:latest
+```
+
 ## 安全提示
 
 - 在公网部署时，强烈建议设置 API 密钥，防止 API 接口被滥用。

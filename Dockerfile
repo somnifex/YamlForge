@@ -19,5 +19,6 @@ EXPOSE 19527
 
 # 设置环境变量 API_KEY
 ENV API_KEY=""
+ENV GUNICORN_TIMEOUT=300
 
-CMD ["gunicorn", "--bind", "0.0.0.0:19527", "--timeout", "3000", "app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:19527 --timeout ${GUNICORN_TIMEOUT} app:app"]

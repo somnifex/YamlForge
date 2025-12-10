@@ -24,6 +24,14 @@ if not os.path.exists(APP_TEMP_DIR):
 
 FILE_CLEANUP_TIMEOUT = 3600  # 1 hour
 
+# Network Configuration with Environment Variables
+DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
+DNS_RESOLVER_TIMEOUT = int(os.environ.get("DNS_RESOLVER_TIMEOUT", 5))
+DNS_RESOLVER_LIFETIME = int(os.environ.get("DNS_RESOLVER_LIFETIME", 10))
+RETRY_BACKOFF_FACTOR = float(os.environ.get("RETRY_BACKOFF_FACTOR", 1))
+RETRY_TOTAL = int(os.environ.get("RETRY_TOTAL", 5))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 10))
+
 def cleanup_stale_files():
     now = time.time()
     try:
@@ -46,14 +54,14 @@ def download_file(url, destination_path=None, proxies=None):
         destination_path = os.path.join(APP_TEMP_DIR, f"{uuid.uuid4()}.tmp")
 
     session = requests.Session()
-    retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=RETRY_TOTAL, backoff_factor=RETRY_BACKOFF_FACTOR, status_forcelist=[500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
     session.mount("http://", HTTPAdapter(max_retries=retries))
 
     last_exception = None
     for attempt in range(3):
         try:
-            with session.get(url, stream=True, proxies=proxies, timeout=180) as response:
+            with session.get(url, stream=True, proxies=proxies, timeout=DOWNLOAD_TIMEOUT) as response:
                 response.raise_for_status()
                 with open(destination_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -178,8 +186,8 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
 
         resolver = dns.resolver.Resolver()
         resolver.nameservers = dns_servers
-        resolver.lifetime = 6
-        resolver.timeout = 2
+        resolver.lifetime = DNS_RESOLVER_LIFETIME
+        resolver.timeout = DNS_RESOLVER_TIMEOUT
 
         resolved_items = []
 
@@ -218,7 +226,7 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
 
         return resolved_items
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
             executor.submit(resolve_single, domain, record_type, dns_servers, 0)
             for record_type in ["A", "AAAA", "CNAME"]
@@ -236,7 +244,7 @@ def generate_server_list(servers, dns_servers, max_depth=8):
     unique_servers = set()
     all_results = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_server = {
             executor.submit(
                 resolve_domain_recursive, server, dns_servers, max_depth

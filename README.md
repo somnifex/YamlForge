@@ -130,6 +130,32 @@ The JavaScript script needs to define a `main` function that takes a JSON object
 
 After the application is running, you can access a simple web interface through `http://IP:19527`, which implements most of the functions.
 
+## Environment Variables / Configuration
+
+The application robustness can be tuned using the following environment variables:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `API_KEY` | Comma-separated list of allowed API keys for authentication. | `""` (Empty) |
+| `GUNICORN_TIMEOUT` | Gunicorn worker timeout in seconds. Increase this for handling large files or slow operations. | `300` |
+| `DOWNLOAD_TIMEOUT` | Timeout in seconds for downloading remote files using `requests`. | `600` |
+| `DNS_RESOLVER_TIMEOUT` | Timeout in seconds for a single DNS resolution query. | `5` |
+| `DNS_RESOLVER_LIFETIME` | Total lifetime in seconds for a DNS resolution attempt. | `10` |
+| `RETRY_BACKOFF_FACTOR` | Backoff factor for retries (linear delay). | `1` |
+| `RETRY_TOTAL` | Maximum number of retries for network requests. | `5` |
+| `MAX_WORKERS` | Number of concurrent threads for DNS resolution. | `10` |
+
+### Example Usage (Docker)
+
+```bash
+docker run -d -p 19527:19527 \
+  -e API_KEY="your-secret-key" \
+  -e GUNICORN_TIMEOUT=600 \
+  -e DOWNLOAD_TIMEOUT=1200 \
+  -e MAX_WORKERS=20 \
+  yamlforge:latest
+```
+
 ## Security Tips
 
 - When deploying on a public network, it is strongly recommended to set an API key to prevent API abuse.
