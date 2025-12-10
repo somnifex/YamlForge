@@ -15,11 +15,75 @@ import shutil
 import dns.resolver
 import dns.exception
 import re
+import time
+import uuid
+
+APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "yamlforge_temp")
+if not os.path.exists(APP_TEMP_DIR):
+    os.makedirs(APP_TEMP_DIR, exist_ok=True)
+
+FILE_CLEANUP_TIMEOUT = 3600  # 1 hour
+
+def cleanup_stale_files():
+    """
+    Cleans up files in the temporary directory that are older than FILE_CLEANUP_TIMEOUT.
+    """
+    now = time.time()
+    try:
+        for filename in os.listdir(APP_TEMP_DIR):
+            file_path = os.path.join(APP_TEMP_DIR, filename)
+            try:
+                if os.path.isfile(file_path):
+                    file_age = now - os.path.getmtime(file_path)
+                    if file_age > FILE_CLEANUP_TIMEOUT:
+                        os.remove(file_path)
+            except OSError:
+                # Ignore errors (e.g., file in use, permission denied)
+                pass
+    except Exception as e:
+        print(f"Error during file cleanup: {e}")
+
+def download_file(url, destination_path=None, proxies=None):
+    """
+    Downloads a file from a URL to a local destination with retry logic and streaming.
+    Triggers cleanup of stale files.
+    """
+    # Trigger cleanup (fire-and-forget style, though here it's synchronous but fast enough)
+    cleanup_stale_files()
+
+    if destination_path is None:
+        destination_path = os.path.join(APP_TEMP_DIR, f"{uuid.uuid4()}.tmp")
+
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+
+    try:
+        with session.get(url, stream=True, proxies=proxies, timeout=60) as response:
+            response.raise_for_status()
+            with open(destination_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        return destination_path
+    except Exception as e:
+        # cleanup if partial file was created
+        if os.path.exists(destination_path):
+            try:
+                os.remove(destination_path)
+            except OSError:
+                pass
+        raise e
+
 
 app = Flask(__name__, static_folder="assets", static_url_path="/assets")
 
 env = os.environ.copy()
-env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"]).decode().strip()
+try:
+    env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"], shell=True).decode().strip()
+except Exception:
+    env["NODE_PATH"] = ""
 API_KEYS = os.environ.get("API_KEY", "").split(",")
 
 
@@ -357,15 +421,11 @@ def listget():
             else:
                 return jsonify({"error": "Invalid proxy format"}), 400
 
+        temp_source_path = None
         try:
-            session = requests.Session()
-            retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-            session.mount("https://", HTTPAdapter(max_retries=retries))
-            session.mount("http://", HTTPAdapter(max_retries=retries))
-
-            response = session.get(source, proxies=proxies, timeout=60)
-            response.raise_for_status()
-            data = yaml.safe_load(response.text)
+            temp_source_path = download_file(source, proxies=proxies)
+            with open(temp_source_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
         except requests.exceptions.Timeout:
             return jsonify({"error": "Request timed out"}), 408
         except requests.exceptions.SSLError:
@@ -374,8 +434,18 @@ def listget():
             return jsonify({"error": f"Failed to fetch source: {str(e)}"}), 500
         except yaml.YAMLError as e:
             return jsonify({"error": f"Invalid YAML format: {str(e)}"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        finally:
+            if temp_source_path and os.path.exists(temp_source_path):
+                try:
+                    os.remove(temp_source_path)
+                except OSError:
+                    pass
+
     except Exception as e:
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
 
     if resolve_domains:
         servers = extract_servers(data, field, max_depth=max_depth)
@@ -449,30 +519,12 @@ def yamlprocess():
             else:
                 return jsonify({"error": "Invalid proxy format"}), 400
 
-        with tempfile.NamedTemporaryFile(
-            "wb", delete=False, suffix=".yaml"
-        ) as temp_yaml_file, tempfile.NamedTemporaryFile(
-            "wb", delete=False, suffix=".js"
-        ) as temp_js_file:
-
-            session = requests.Session()
-            retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-            adapter = HTTPAdapter(max_retries=retries)
-            session.mount("https://", adapter)
-            session.mount("http://", adapter)
-
-            with session.get(source_url, stream=True, proxies=proxies, timeout=60) as response:
-                response.raise_for_status()
-                for chunk in response.iter_content(chunk_size=8192):
-                    temp_yaml_file.write(chunk)
-            temp_yaml_file_path = temp_yaml_file.name
-
-            with session.get(merge_url, proxies=proxies, timeout=60) as response:
-                response.raise_for_status()
-                temp_js_file.write(response.content)
-            temp_js_file_path = temp_js_file.name
-
+        temp_yaml_file_path = None
+        temp_js_file_path = None
         try:
+            temp_yaml_file_path = download_file(source_url, proxies=proxies)
+            temp_js_file_path = download_file(merge_url, proxies=proxies)
+
             process_yaml_with_js(temp_yaml_file_path, temp_js_file_path)
 
             download_filename = filename or os.path.basename(source_url)
@@ -480,8 +532,12 @@ def yamlprocess():
                 temp_yaml_file_path, as_attachment=True, download_name=download_filename
             )
         finally:
-            os.remove(temp_yaml_file_path)
-            os.remove(temp_js_file_path)
+            if temp_js_file_path and os.path.exists(temp_js_file_path):
+                try:
+                    os.remove(temp_js_file_path)
+                except OSError:
+                    pass
+
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Error fetching files: {e}"}), 500
     except Exception as e:
@@ -489,4 +545,4 @@ def yamlprocess():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=19527, timeout=300)
+    app.run(host="0.0.0.0", port=19527, timeout=3000)
