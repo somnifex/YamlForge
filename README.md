@@ -6,7 +6,7 @@
 </h1>
 
 <p align="center">
- <a href="docs/README.cn.md">简体中文</a> | <a href="README.md">English</a>
+  <a href="README.md">English</a> | <a href="docs/README.cn.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -24,8 +24,9 @@
 - **JavaScript Script Processing:** Supports modification and merging of YAML configurations using JavaScript scripts.
 - **GitHub Integration:** Automatically uploads generated `.list` files to a GitHub repository.
 - **Simple Web Interface:** Provides a simple web interface for user configuration and operation.
+- **Resilient Downloads:** Retries and detects partial downloads to better handle poor network conditions.
 
-## Usage Guide --restart unless-stopped
+## Usage Guide
 
 ### 1. Deployment
 
@@ -90,7 +91,7 @@ After the application is running, you can use the following API interfaces for o
 | `api_key`         | API key                                                                                                                                           | Yes      |                     |
 | `source`          | URL of the YAML file, **Note: To prevent unexpected issues, it is recommended to URL encode the URL**                                             | Yes      |                     |
 | `proxy`           | Proxy configuration used for downloading the YAML file, format: http://user:pass@host:port or socks5://host:port                                  | No       |                     |
-| `field`           | Field to extract (effective when `resolve_domains` is `false`)                                                                                    | No       | `general.name`      |
+| `field`           | Field to extract (effective when `resolve_domains` is `false`)                                                                                    | No       | `proxies.server`    |
 | `repo`            | GitHub repository name (format: `username/repo`)                                                                                                  | No       |                     |
 | `token`           | GitHub personal access token                                                                                                                      | No       |                     |
 | `branch`          | GitHub branch name                                                                                                                                | No       | `main`              |
@@ -144,6 +145,8 @@ The application robustness can be tuned using the following environment variable
 | `RETRY_BACKOFF_FACTOR` | Backoff factor for retries (linear delay). | `1` |
 | `RETRY_TOTAL` | Maximum number of retries for network requests. | `5` |
 | `MAX_WORKERS` | Number of concurrent threads for DNS resolution. | `10` |
+| `DOWNLOAD_ATTEMPTS` | Maximum attempts for downloading a remote file (outer retry loop for broken connections). | `5` |
+| `DOWNLOAD_RETRY_WAIT` | Seconds to wait between download attempts (multiplied by the attempt number for gentle backoff). | `2` |
 
 ### Example Usage (Docker)
 

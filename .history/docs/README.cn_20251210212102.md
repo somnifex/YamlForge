@@ -54,7 +54,7 @@ docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KE
    docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key yamlforge
    ```
 
-#### 直接运行 (Python 3.12)
+#### 直接运行 (Python 3.9)
 
 1. 克隆仓库:
    ```bash

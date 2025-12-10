@@ -17,6 +17,7 @@ import dns.exception
 import re
 import time
 import uuid
+import http.client
 
 APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "yamlforge_temp")
 if not os.path.exists(APP_TEMP_DIR):
@@ -31,6 +32,8 @@ DNS_RESOLVER_LIFETIME = int(os.environ.get("DNS_RESOLVER_LIFETIME", 10))
 RETRY_BACKOFF_FACTOR = float(os.environ.get("RETRY_BACKOFF_FACTOR", 1))
 RETRY_TOTAL = int(os.environ.get("RETRY_TOTAL", 5))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 10))
+DOWNLOAD_ATTEMPTS = int(os.environ.get("DOWNLOAD_ATTEMPTS", 5))
+DOWNLOAD_RETRY_WAIT = float(os.environ.get("DOWNLOAD_RETRY_WAIT", 2))
 
 def cleanup_stale_files():
     now = time.time()
@@ -59,16 +62,31 @@ def download_file(url, destination_path=None, proxies=None):
     session.mount("http://", HTTPAdapter(max_retries=retries))
 
     last_exception = None
-    for attempt in range(3):
+    for attempt in range(DOWNLOAD_ATTEMPTS):
         try:
             with session.get(url, stream=True, proxies=proxies, timeout=DOWNLOAD_TIMEOUT) as response:
                 response.raise_for_status()
+                expected_length_header = response.headers.get("content-length")
+                try:
+                    expected_length = int(expected_length_header) if expected_length_header else None
+                except ValueError:
+                    expected_length = None
+                downloaded_bytes = 0
                 with open(destination_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                if expected_length is not None and downloaded_bytes < expected_length:
+                    raise requests.exceptions.ContentDecodingError(
+                        f"Incomplete download: expected {expected_length} bytes, got {downloaded_bytes}"
+                    )
             return destination_path
-        except (requests.exceptions.RequestException, requests.exceptions.ChunkedEncodingError) as e:
+        except (
+            requests.exceptions.RequestException,
+            requests.exceptions.ChunkedEncodingError,
+            http.client.IncompleteRead,
+        ) as e:
             last_exception = e
             print(f"Download attempt {attempt + 1} failed for {url}: {e}. Retrying...")
             if os.path.exists(destination_path):
@@ -76,7 +94,12 @@ def download_file(url, destination_path=None, proxies=None):
                     os.remove(destination_path)
                 except OSError:
                     pass
-            time.sleep(2)  
+            time.sleep(DOWNLOAD_RETRY_WAIT * (attempt + 1))
+
+    if isinstance(last_exception, http.client.IncompleteRead):
+        raise requests.exceptions.ConnectionError(
+            f"Incomplete download after {DOWNLOAD_ATTEMPTS} attempts: {last_exception}"
+        ) from last_exception
     raise last_exception or Exception("Unknown download error")
 
 
@@ -296,10 +319,18 @@ def upload_to_github(
     repo = g.get_repo(repo_name)
     file_path = posixpath.join(path, rename)
 
+    contents = None
+    file_exists = False
     try:
         contents = repo.get_contents(file_path, ref=branch)
+        if isinstance(contents, list):
+            raise ValueError(
+                f"Path '{file_path}' refers to a directory, please provide a file path"
+            )
         file_exists = True
     except Exception as e:
+        if isinstance(e, ValueError):
+            raise e
         if "Not Found" in str(e):
             file_exists = False
         else:
@@ -309,6 +340,8 @@ def upload_to_github(
         file_content = f.read()
 
     if file_exists:
+        if contents is None:
+            raise RuntimeError("Expected existing file contents but none were retrieved")
         try:
             repo.update_file(
                 contents.path,
@@ -430,11 +463,20 @@ def listget():
             with open(temp_source_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
         except requests.exceptions.Timeout:
-            return jsonify({"error": "Request timed out"}), 408
+            return jsonify({"error": "Request timed out while fetching source"}), 408
         except requests.exceptions.SSLError:
             return jsonify({"error": "SSL verification failed"}), 495
         except requests.exceptions.RequestException as e:
-            return jsonify({"error": f"Failed to fetch source: {str(e)}"}), 500
+            print(f"Network error while fetching source {source}: {e}")
+            return (
+                jsonify(
+                    {
+                        "error": "Network error while fetching source, please retry or provide a mirror URL",
+                        "detail": str(e),
+                    }
+                ),
+                502,
+            )
         except yaml.YAMLError as e:
             return jsonify({"error": f"Invalid YAML format: {str(e)}"}), 400
         except Exception as e:
@@ -541,11 +583,24 @@ def yamlprocess():
                 except OSError:
                     pass
 
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Request timed out while fetching files"}), 408
+    except requests.exceptions.SSLError:
+        return jsonify({"error": "SSL verification failed"}), 495
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Error fetching files: {e}"}), 500
+        print(f"Network error while fetching files: {e}")
+        return (
+            jsonify(
+                {
+                    "error": "Network error while fetching files, please retry or provide a mirror URL",
+                    "detail": str(e),
+                }
+            ),
+            502,
+        )
     except Exception as e:
         return jsonify({"error": f"Error processing files: {e}"}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=19527, timeout=300)
+    app.run(host="0.0.0.0", port=19527)
