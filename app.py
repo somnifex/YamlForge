@@ -358,7 +358,6 @@ def listget():
                 return jsonify({"error": "Invalid proxy format"}), 400
 
         try:
-        try:
             session = requests.Session()
             retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
             session.mount("https://", HTTPAdapter(max_retries=retries))
