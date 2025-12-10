@@ -25,9 +25,6 @@ if not os.path.exists(APP_TEMP_DIR):
 FILE_CLEANUP_TIMEOUT = 3600  # 1 hour
 
 def cleanup_stale_files():
-    """
-    Cleans up files in the temporary directory that are older than FILE_CLEANUP_TIMEOUT.
-    """
     now = time.time()
     try:
         for filename in os.listdir(APP_TEMP_DIR):
@@ -38,17 +35,11 @@ def cleanup_stale_files():
                     if file_age > FILE_CLEANUP_TIMEOUT:
                         os.remove(file_path)
             except OSError:
-                # Ignore errors (e.g., file in use, permission denied)
                 pass
     except Exception as e:
         print(f"Error during file cleanup: {e}")
 
 def download_file(url, destination_path=None, proxies=None):
-    """
-    Downloads a file from a URL to a local destination with retry logic and streaming.
-    Triggers cleanup of stale files.
-    """
-    # Trigger cleanup (fire-and-forget style, though here it's synchronous but fast enough)
     cleanup_stale_files()
 
     if destination_path is None:
@@ -59,22 +50,26 @@ def download_file(url, destination_path=None, proxies=None):
     session.mount("https://", HTTPAdapter(max_retries=retries))
     session.mount("http://", HTTPAdapter(max_retries=retries))
 
-    try:
-        with session.get(url, stream=True, proxies=proxies, timeout=60) as response:
-            response.raise_for_status()
-            with open(destination_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        return destination_path
-    except Exception as e:
-        # cleanup if partial file was created
-        if os.path.exists(destination_path):
-            try:
-                os.remove(destination_path)
-            except OSError:
-                pass
-        raise e
+    last_exception = None
+    for attempt in range(3):
+        try:
+            with session.get(url, stream=True, proxies=proxies, timeout=180) as response:
+                response.raise_for_status()
+                with open(destination_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            return destination_path
+        except (requests.exceptions.RequestException, requests.exceptions.ChunkedEncodingError) as e:
+            last_exception = e
+            print(f"Download attempt {attempt + 1} failed for {url}: {e}. Retrying...")
+            if os.path.exists(destination_path):
+                try:
+                    os.remove(destination_path)
+                except OSError:
+                    pass
+            time.sleep(2)  
+    raise last_exception or Exception("Unknown download error")
 
 
 app = Flask(__name__, static_folder="assets", static_url_path="/assets")
@@ -545,4 +540,4 @@ def yamlprocess():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=19527, timeout=3000)
+    app.run(host="0.0.0.0", port=19527, timeout=300)
