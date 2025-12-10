@@ -21,22 +21,14 @@ env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"]).decode().strip
 API_KEYS = os.environ.get("API_KEY", "").split(",")
 
 
-def extract_servers(source_url, field=None, max_depth=8):
-    response = requests.get(source_url)
-    response.raise_for_status()
-    data = yaml.safe_load(response.text)
-
+def extract_servers(data, field=None, max_depth=8):
     servers = set()
-
-    # 域名匹配正则表达式
     domain_pattern = re.compile(
         r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6}"
     )
-    # IPv4 地址匹配正则表达式
     ipv4_pattern = re.compile(
         r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
     )
-    # IPv6 地址匹配正则表达式
     ipv6_pattern = re.compile(
         r"(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))"
     )
@@ -98,12 +90,14 @@ def extract_field(data, field, max_depth=8, current_depth=0):
             return None
     return data
 
+
 PRIVATE_NETWORKS = [
-    ipaddress.ip_network('10.0.0.0/8'),
-    ipaddress.ip_network('172.16.0.0/12'),
-    ipaddress.ip_network('192.168.0.0/16'),
-    ipaddress.ip_network('fc00::/7')
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
 ]
+
 
 def is_private_ip(ip_address):
     try:
@@ -111,6 +105,7 @@ def is_private_ip(ip_address):
         return any(addr in network for network in PRIVATE_NETWORKS)
     except ipaddress.AddressValueError:
         return False
+
 
 def resolve_domain_recursive(domain, dns_servers, max_depth=8):
     unique_servers = set()
@@ -138,24 +133,35 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
                 if ip_or_cname not in unique_servers:
                     unique_servers.add(ip_or_cname)
                     if record_type == "CNAME":
-                         resolved_items.append(f"DOMAIN:{ip_or_cname}")
-                         resolved_items.extend(resolve_single(ip_or_cname, "A", dns_servers, depth + 1))
-                         resolved_items.extend(resolve_single(ip_or_cname, "AAAA", dns_servers, depth + 1))
+                        resolved_items.append(f"DOMAIN:{ip_or_cname}")
+                        resolved_items.extend(
+                            resolve_single(ip_or_cname, "A", dns_servers, depth + 1)
+                        )
+                        resolved_items.extend(
+                            resolve_single(ip_or_cname, "AAAA", dns_servers, depth + 1)
+                        )
 
                     elif not is_private_ip(ip_or_cname):
                         resolved_items.append(ip_or_cname)
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers,
-                dns.exception.Timeout, dns.resolver.LifetimeTimeout):
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+            dns.exception.Timeout,
+            dns.resolver.LifetimeTimeout,
+        ):
             pass
         except Exception as e:
-             print(f"Unexpected error resolving {domain} ({record_type}): {e}")
-             pass
+            print(f"Unexpected error resolving {domain} ({record_type}): {e}")
+            pass
 
         return resolved_items
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(resolve_single, domain, record_type, dns_servers, 0)
-                   for record_type in ["A", "AAAA", "CNAME"]]
+        futures = [
+            executor.submit(resolve_single, domain, record_type, dns_servers, 0)
+            for record_type in ["A", "AAAA", "CNAME"]
+        ]
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.extend(future.result())
@@ -164,14 +170,20 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
 
     return results
 
+
 def generate_server_list(servers, dns_servers, max_depth=8):
     unique_servers = set()
     all_results = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_server = {executor.submit(resolve_domain_recursive, server, dns_servers, max_depth): server
-                             for server in servers
-                             if ":" not in server and (not "." in server or not server.replace(".", "").isdigit())}
+        future_to_server = {
+            executor.submit(
+                resolve_domain_recursive, server, dns_servers, max_depth
+            ): server
+            for server in servers
+            if ":" not in server
+            and (not "." in server or not server.replace(".", "").isdigit())
+        }
 
         for future in concurrent.futures.as_completed(future_to_server):
             server = future_to_server[future]
@@ -179,8 +191,8 @@ def generate_server_list(servers, dns_servers, max_depth=8):
                 results = future.result()
                 for item in results:
                     if item not in unique_servers:
-                         unique_servers.add(item)
-                         all_results.append(item)
+                        unique_servers.add(item)
+                        all_results.append(item)
 
             except Exception as e:
                 print(f"Error resolving {server}: {e}")
@@ -188,17 +200,17 @@ def generate_server_list(servers, dns_servers, max_depth=8):
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
         filename = f.name
         for result in all_results:
-             if result.startswith("DOMAIN:"):
-                 f.write(f"{result[7:]}\n")
-             else: # 如果是IP
-                 f.write(f"{result}\n")
+            if result.startswith("DOMAIN:"):
+                f.write(f"{result[7:]}\n")
+            else:
+                f.write(f"{result}\n")
 
         for server in servers:
             if server not in unique_servers:
-                if ":" in server :
+                if ":" in server:
                     if not is_private_ip(server):
-                         f.write(f"{server}\n")
-                         unique_servers.add(server)
+                        f.write(f"{server}\n")
+                        unique_servers.add(server)
                 elif server.replace(".", "").isdigit():
                     if not is_private_ip(server):
                         f.write(f"{server}\n")
@@ -207,10 +219,11 @@ def generate_server_list(servers, dns_servers, max_depth=8):
 
 
 def upload_to_github(
-    filename, repo_name, token, branch="main", path="", rename="yaml.list"):
+    filename, repo_name, token, branch="main", path="", rename="yaml.list"
+):
 
     g = Github(token)
-    
+
     repo = g.get_repo(repo_name)
     file_path = posixpath.join(path, rename)
 
@@ -358,7 +371,7 @@ def listget():
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
     if resolve_domains:
-        servers = extract_servers(source, field, max_depth=max_depth)
+        servers = extract_servers(data, field, max_depth=max_depth)
     else:
         servers = extract_field(data, field, max_depth=max_depth)
         if not servers:
@@ -435,17 +448,13 @@ def yamlprocess():
             "wb", delete=False, suffix=".js"
         ) as temp_js_file:
 
-            with requests.get(
-                source_url, stream=True, proxies=proxies
-            ) as response:
+            with requests.get(source_url, stream=True, proxies=proxies) as response:
                 response.raise_for_status()
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_yaml_file.write(chunk)
             temp_yaml_file_path = temp_yaml_file.name
 
-            with requests.get(
-                merge_url, proxies=proxies
-            ) as response:
+            with requests.get(merge_url, proxies=proxies) as response:
                 response.raise_for_status()
                 temp_js_file.write(response.content)
             temp_js_file_path = temp_js_file.name
