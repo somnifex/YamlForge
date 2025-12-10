@@ -1,5 +1,7 @@
 import subprocess
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import yaml
 import os
 import concurrent.futures
@@ -356,7 +358,13 @@ def listget():
                 return jsonify({"error": "Invalid proxy format"}), 400
 
         try:
-            response = requests.get(source, proxies=proxies, timeout=60)
+        try:
+            session = requests.Session()
+            retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+            session.mount("https://", HTTPAdapter(max_retries=retries))
+            session.mount("http://", HTTPAdapter(max_retries=retries))
+
+            response = session.get(source, proxies=proxies, timeout=60)
             response.raise_for_status()
             data = yaml.safe_load(response.text)
         except requests.exceptions.Timeout:
@@ -448,13 +456,19 @@ def yamlprocess():
             "wb", delete=False, suffix=".js"
         ) as temp_js_file:
 
-            with requests.get(source_url, stream=True, proxies=proxies) as response:
+            session = requests.Session()
+            retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+            adapter = HTTPAdapter(max_retries=retries)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+
+            with session.get(source_url, stream=True, proxies=proxies, timeout=60) as response:
                 response.raise_for_status()
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_yaml_file.write(chunk)
             temp_yaml_file_path = temp_yaml_file.name
 
-            with requests.get(merge_url, proxies=proxies) as response:
+            with session.get(merge_url, proxies=proxies, timeout=60) as response:
                 response.raise_for_status()
                 temp_js_file.write(response.content)
             temp_js_file_path = temp_js_file.name
