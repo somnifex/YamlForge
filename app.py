@@ -197,6 +197,22 @@ def extract_server_port_map(data, max_depth=8):
 
     return server_port_map
 
+
+def format_host_with_port(host, port):
+    if not port:
+        return host
+
+    stripped_host = host.strip("[]")
+
+    try:
+        ip_obj = ipaddress.ip_address(stripped_host)
+        if ip_obj.version == 6:
+            return f"[{stripped_host}]:{port}"
+    except ValueError:
+        pass
+
+    return f"{host}:{port}"
+
 PRIVATE_NETWORKS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -287,7 +303,7 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
         if server and server_port_map:
             port = server_port_map.get(str(server))
             if port:
-                return f"{base_value}:{port}"
+                return format_host_with_port(base_value, port)
 
         return base_value
 
@@ -562,7 +578,9 @@ def listget():
         with open(temp_filename, "w", encoding="utf-8") as f:
             for server in servers:
                 if port_requested:
-                    f.write(f"{server}:{server_port_map.get(str(server))}\n")
+                    f.write(
+                        f"{format_host_with_port(server, server_port_map.get(str(server)))}\n"
+                    )
                 else:
                     f.write(f"{server}\n")
 
