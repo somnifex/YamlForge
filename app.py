@@ -193,7 +193,12 @@ def extract_server_port_map(data, max_depth=8):
                 server = item.get("server")
                 port = item.get("port")
                 if server and port is not None:
-                    server_port_map[str(server)] = str(port)
+                    server_key = str(server)
+                    if server_key not in server_port_map:
+                        server_port_map[server_key] = []
+                    port_str = str(port)
+                    if port_str not in server_port_map[server_key]:
+                        server_port_map[server_key].append(port_str)
 
     return server_port_map
 
@@ -301,11 +306,11 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
         base_value = value[7:] if value.startswith("DOMAIN:") else value
 
         if server and server_port_map:
-            port = server_port_map.get(str(server))
-            if port:
-                return format_host_with_port(base_value, port)
+            ports = server_port_map.get(str(server))
+            if ports:
+                return [format_host_with_port(base_value, port) for port in ports]
 
-        return base_value
+        return [base_value]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_server = {
@@ -322,10 +327,11 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
             try:
                 results = future.result()
                 for item in results:
-                    formatted_item = format_output(item, server)
-                    if formatted_item not in unique_servers:
-                        unique_servers.add(formatted_item)
-                        all_results.append(formatted_item)
+                    formatted_items = format_output(item, server)
+                    for formatted_item in formatted_items:
+                        if formatted_item not in unique_servers:
+                            unique_servers.add(formatted_item)
+                            all_results.append(formatted_item)
 
             except Exception as e:
                 print(f"Error resolving {server}: {e}")
@@ -336,18 +342,19 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
             f.write(f"{result}\n")
 
         for server in servers:
-            formatted_server = format_output(server, server)
+            formatted_servers = format_output(server, server)
             base_value = server[7:] if server.startswith("DOMAIN:") else server
 
-            if formatted_server not in unique_servers:
-                if ":" in server:
-                    if not is_private_ip(base_value):
-                        f.write(f"{formatted_server}\n")
-                        unique_servers.add(formatted_server)
-                elif server.replace(".", "").isdigit():
-                    if not is_private_ip(base_value):
-                        f.write(f"{formatted_server}\n")
-                        unique_servers.add(formatted_server)
+            for formatted_server in formatted_servers:
+                if formatted_server not in unique_servers:
+                    if ":" in server:
+                        if not is_private_ip(base_value):
+                            f.write(f"{formatted_server}\n")
+                            unique_servers.add(formatted_server)
+                    elif server.replace(".", "").isdigit():
+                        if not is_private_ip(base_value):
+                            f.write(f"{formatted_server}\n")
+                            unique_servers.add(formatted_server)
     return filename
 
 
@@ -551,7 +558,7 @@ def listget():
     if port_requested:
         if not server_port_map:
             return jsonify({"error": "Port data not found for proxies.server.port"}), 400
-        missing_ports = [s for s in servers if server_port_map.get(str(s)) is None]
+        missing_ports = [s for s in servers if not server_port_map.get(str(s))]
         if missing_ports:
             return (
                 jsonify({"error": f"Port not found for servers: {', '.join(map(str, missing_ports))}"}),
@@ -578,9 +585,9 @@ def listget():
         with open(temp_filename, "w", encoding="utf-8") as f:
             for server in servers:
                 if port_requested:
-                    f.write(
-                        f"{format_host_with_port(server, server_port_map.get(str(server)))}\n"
-                    )
+                    ports = server_port_map.get(str(server), [])
+                    for port in ports:
+                        f.write(f"{format_host_with_port(server, port)}\n")
                 else:
                     f.write(f"{server}\n")
 
