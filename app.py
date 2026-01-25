@@ -183,6 +183,20 @@ def extract_field(data, field, max_depth=8, current_depth=0):
     return data
 
 
+def extract_server_port_map(data, max_depth=8):
+    proxies = extract_field(data, "proxies", max_depth=max_depth)
+    server_port_map = {}
+
+    if isinstance(proxies, list):
+        for item in proxies:
+            if isinstance(item, dict):
+                server = item.get("server")
+                port = item.get("port")
+                if server and port is not None:
+                    server_port_map[str(server)] = str(port)
+
+    return server_port_map
+
 PRIVATE_NETWORKS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -263,9 +277,19 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
     return results
 
 
-def generate_server_list(servers, dns_servers, max_depth=8):
+def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None):
     unique_servers = set()
     all_results = []
+
+    def format_output(value, server=None):
+        base_value = value[7:] if value.startswith("DOMAIN:") else value
+
+        if server and server_port_map:
+            port = server_port_map.get(str(server))
+            if port:
+                return f"{base_value}:{port}"
+
+        return base_value
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_server = {
@@ -282,9 +306,10 @@ def generate_server_list(servers, dns_servers, max_depth=8):
             try:
                 results = future.result()
                 for item in results:
-                    if item not in unique_servers:
-                        unique_servers.add(item)
-                        all_results.append(item)
+                    formatted_item = format_output(item, server)
+                    if formatted_item not in unique_servers:
+                        unique_servers.add(formatted_item)
+                        all_results.append(formatted_item)
 
             except Exception as e:
                 print(f"Error resolving {server}: {e}")
@@ -292,21 +317,21 @@ def generate_server_list(servers, dns_servers, max_depth=8):
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
         filename = f.name
         for result in all_results:
-            if result.startswith("DOMAIN:"):
-                f.write(f"{result[7:]}\n")
-            else:
-                f.write(f"{result}\n")
+            f.write(f"{result}\n")
 
         for server in servers:
-            if server not in unique_servers:
+            formatted_server = format_output(server, server)
+            base_value = server[7:] if server.startswith("DOMAIN:") else server
+
+            if formatted_server not in unique_servers:
                 if ":" in server:
-                    if not is_private_ip(server):
-                        f.write(f"{server}\n")
-                        unique_servers.add(server)
+                    if not is_private_ip(base_value):
+                        f.write(f"{formatted_server}\n")
+                        unique_servers.add(formatted_server)
                 elif server.replace(".", "").isdigit():
-                    if not is_private_ip(server):
-                        f.write(f"{server}\n")
-                        unique_servers.add(server)
+                    if not is_private_ip(base_value):
+                        f.write(f"{formatted_server}\n")
+                        unique_servers.add(formatted_server)
     return filename
 
 
@@ -492,16 +517,30 @@ def listget():
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 
+    port_requested = field.endswith(".port")
+    effective_field = field[: -len(".port")] if port_requested else field
+    server_port_map = extract_server_port_map(data, max_depth=max_depth) if port_requested else {}
+
     if resolve_domains:
-        servers = extract_servers(data, field, max_depth=max_depth)
+        servers = extract_servers(data, effective_field, max_depth=max_depth)
     else:
-        servers = extract_field(data, field, max_depth=max_depth)
+        servers = extract_field(data, effective_field, max_depth=max_depth)
         if not servers:
-            return jsonify({"error": f"Field '{field}' not found in YAML"}), 400
+            return jsonify({"error": f"Field '{effective_field}' not found in YAML"}), 400
         if isinstance(servers, list):
             servers = [s for s in servers if s]
         else:
             return jsonify({"error": "Invalid field structure"}), 400
+
+    if port_requested:
+        if not server_port_map:
+            return jsonify({"error": "Port data not found for proxies.server.port"}), 400
+        missing_ports = [s for s in servers if server_port_map.get(str(s)) is None]
+        if missing_ports:
+            return (
+                jsonify({"error": f"Port not found for servers: {', '.join(map(str, missing_ports))}"}),
+                400,
+            )
 
     if resolve_domains:
         if dns_servers_str:
@@ -512,12 +551,20 @@ def listget():
         for dns_server in dns_servers:
             socket.getaddrinfo(dns_server, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
 
-        temp_filename = generate_server_list(servers, dns_servers, max_depth=max_depth)
+        temp_filename = generate_server_list(
+            servers,
+            dns_servers,
+            max_depth=max_depth,
+            server_port_map=server_port_map if port_requested else None,
+        )
     else:
         temp_filename = tempfile.mktemp(suffix=".txt")
         with open(temp_filename, "w", encoding="utf-8") as f:
             for server in servers:
-                f.write(f"{server}\n")
+                if port_requested:
+                    f.write(f"{server}:{server_port_map.get(str(server))}\n")
+                else:
+                    f.write(f"{server}\n")
 
     try:
         if repo and token:

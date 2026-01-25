@@ -143,6 +143,7 @@ package-lock.json
 # IDEs
 .vscode/
 .idea/
+.history/
 
 # OS specific
 .DS_Store

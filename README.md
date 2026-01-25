@@ -91,7 +91,7 @@ After the application is running, you can use the following API interfaces for o
 | `api_key`         | API key                                                                                                                                           | Yes      |                     |
 | `source`          | URL of the YAML file, **Note: To prevent unexpected issues, it is recommended to URL encode the URL**                                             | Yes      |                     |
 | `proxy`           | Proxy configuration used for downloading the YAML file, format: http://user:pass@host:port or socks5://host:port                                  | No       |                     |
-| `field`           | Field to extract (effective when `resolve_domains` is `false`)                                                                                    | No       | `proxies.server`    |
+| `field`           | Field to extract (effective when `resolve_domains` is `false`); supports `proxies.server` or `proxies.server.port` to append port values           | No       | `proxies.server`    |
 | `repo`            | GitHub repository name (format: `username/repo`)                                                                                                  | No       |                     |
 | `token`           | GitHub personal access token                                                                                                                      | No       |                     |
 | `branch`          | GitHub branch name                                                                                                                                | No       | `main`              |

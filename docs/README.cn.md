@@ -89,7 +89,7 @@ docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KE
 | `api_key`         | API 密钥                                                                         | 是       |                       |
 | `source`          | YAML 文件的 URL，**注意，为了防止出现意想不到的问题，建议进行URL encode** | 是       |                       |
 | `proxy`           | 下载YAML文件使用的代理配置，格式: http://user:pass@host:port 或 socks5://host:port| 否       |                       |
-| `field`           | 需要提取的字段 (当 `resolve_domains` 为 `false` 时生效)                      | 否       | `proxies.server`    |
+| `field`           | 需要提取的字段 (当 `resolve_domains` 为 `false` 时生效)，支持 `proxies.server` 或 `proxies.server.port` 以追加端口 | 否       | `proxies.server`    |
 | `repo`            | GitHub 仓库名称 (格式:`username/repo`)                                         | 否       |                       |
 | `token`           | GitHub 个人访问令牌                                                              | 否       |                       |
 | `branch`          | GitHub 分支名称                                                                  | 否       | `main`              |
