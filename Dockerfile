@@ -6,7 +6,8 @@ FROM python:3.12-alpine
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apk add --no-cache libstdc++ && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY --from=node-builder /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
