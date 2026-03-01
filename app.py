@@ -29,10 +29,14 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
     """
     使用 DoH (DNS over HTTPS) 解析域名
 
+    策略：
+    1. 优先使用原始域名 URL 直接请求（兼容性最好）
+    2. 若直接请求失败，回落到 IP-based 请求（IPv4 优先，IPv6 兜底）
+
     Args:
         domain: 要解析的域名
         doh_url: DoH 服务器 URL (如 https://dns.google/dns-query)
-        dns_servers: 用于解析 DoH 域名的 DNS 服务器列表
+        dns_servers: 用于解析 DoH 域名的 DNS 服务器列表（IP-based 回落时使用）
         record_types: 要查询的记录类型列表，默认为 ['A', 'AAAA']
 
     Returns:
@@ -42,9 +46,43 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
         record_types = ['A', 'AAAA']
 
     results = set()
+    session = requests.Session()
+    parsed_url = doh_url.split('/')
+    scheme = parsed_url[0]
+    doh_domain_raw = parsed_url[2]
+    doh_domain = doh_domain_raw.strip('[]')
 
-    doh_domain_raw = doh_url.split('/')[2]
-    doh_domain = doh_domain_raw.strip('[]') 
+    def _query_url(url, extra_headers=None):
+        """对指定 URL 发起全部 record_type 的 DoH 查询，返回命中的 IP 集合"""
+        url_results = set()
+        headers = {'Accept': 'application/dns-json'}
+        if extra_headers:
+            headers.update(extra_headers)
+        for record_type in record_types:
+            try:
+                response = session.get(
+                    url,
+                    params={'name': domain, 'type': record_type},
+                    headers=headers,
+                    timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                    verify=False
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'Answer' in data:
+                        for answer in data['Answer']:
+                            if answer['type'] in (1, 28):  # A or AAAA
+                                ip = answer['data']
+                                if not is_private_ip(ip):
+                                    url_results.add(ip)
+            except Exception as e:
+                print(f"DoH query failed for {domain} ({record_type}): {e}")
+        return url_results
+
+    results = _query_url(doh_url)
+    if results:
+        return list(results)
+
     doh_ips = []
 
     if dns_servers:
@@ -56,7 +94,6 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
                 resolver.nameservers = [dns_server]
                 resolver.lifetime = DNS_RESOLVER_LIFETIME
                 resolver.timeout = DNS_RESOLVER_TIMEOUT
-
                 for record_type in ['A', 'AAAA']:
                     try:
                         answers = resolver.resolve(doh_domain, record_type)
@@ -78,60 +115,34 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
                     doh_ips.append(ip)
         except Exception as e:
             print(f"Failed to resolve DoH server {doh_domain}: {e}")
-            return list(results)
+            return []
 
     def _ip_version(ip):
         try:
             return ipaddress.ip_address(ip).version
         except ValueError:
-            return 4 
+            return 4
+
     doh_ips_v4 = [ip for ip in doh_ips if _ip_version(ip) == 4]
     doh_ips_v6 = [ip for ip in doh_ips if _ip_version(ip) == 6]
 
-    session = requests.Session()
-    parsed_url = doh_url.split('/')
-    scheme = parsed_url[0]
-    is_https = scheme == 'https:'
-
-    def _query_ip(doh_ip):
-        ip_results = set()
-        if not is_https:
-            return ip_results
+    def _query_via_ip(doh_ip):
         try:
             ip_obj = ipaddress.ip_address(doh_ip)
             doh_ip_in_url = f"[{doh_ip}]" if ip_obj.version == 6 else doh_ip
         except ValueError:
             doh_ip_in_url = doh_ip
         ip_url = f"{scheme}//{doh_ip_in_url}/{'/'.join(parsed_url[3:])}"
-        for record_type in record_types:
-            try:
-                query_params = {'name': domain, 'type': record_type}
-                headers = {'Host': doh_domain, 'Accept': 'application/dns-json'}
-                response = session.get(
-                    ip_url,
-                    params=query_params,
-                    headers=headers,
-                    timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
-                    verify=False
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'Answer' in data:
-                        for answer in data['Answer']:
-                            if answer['type'] in (1, 28):  # A or AAAA
-                                ip = answer['data']
-                                if not is_private_ip(ip):
-                                    ip_results.add(ip)
-            except Exception as e:
-                print(f"DoH query failed for {domain} ({record_type}): {e}")
-        return ip_results
+        return _query_url(ip_url, extra_headers={'Host': doh_domain})
 
+    # IPv4 优先
     for doh_ip in doh_ips_v4:
-        results.update(_query_ip(doh_ip))
+        results.update(_query_via_ip(doh_ip))
 
+    # IPv6 仅在 IPv4 全部失败时回落
     if not results:
         for doh_ip in doh_ips_v6:
-            results.update(_query_ip(doh_ip))
+            results.update(_query_via_ip(doh_ip))
             if results:
                 break
 
@@ -143,7 +154,6 @@ def is_doh_server(server):
 
 
 def filter_doh_servers(servers):
-    """从服务器列表中筛选出 DoH 服务器"""
     doh_servers = []
     udp_servers = []
     for server in servers:
@@ -159,7 +169,6 @@ if not os.path.exists(APP_TEMP_DIR):
 
 FILE_CLEANUP_TIMEOUT = 3600  # 1 hour
 
-# Network Configuration with Environment Variables
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
 DNS_RESOLVER_TIMEOUT = int(os.environ.get("DNS_RESOLVER_TIMEOUT", 5))
 DNS_RESOLVER_LIFETIME = int(os.environ.get("DNS_RESOLVER_LIFETIME", 10))
