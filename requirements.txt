@@ -4,5 +4,6 @@ PyYAML
 Flask
 PyGithub
 gunicorn
+waitress
 dnspython
 urllib3

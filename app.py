@@ -778,9 +778,16 @@ def listget():
                     500,
                 )
         else:
+            @app.after_this_request
+            def _remove_temp(response):
+                try:
+                    os.remove(temp_filename)
+                except OSError:
+                    pass
+                return response
             return send_file(temp_filename, as_attachment=True, download_name=filename)
     finally:
-        os.remove(temp_filename)
+        pass
 
 
 @app.route("/yamlprocess", methods=["GET"])
@@ -817,6 +824,17 @@ def yamlprocess():
             process_yaml_with_js(temp_yaml_file_path, temp_js_file_path)
 
             download_filename = filename or os.path.basename(source_url)
+            _yaml_path = temp_yaml_file_path
+            _js_path = temp_js_file_path
+            @app.after_this_request
+            def _remove_temps(response):
+                for p in (_yaml_path, _js_path):
+                    if p and os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                return response
             return send_file(
                 temp_yaml_file_path, as_attachment=True, download_name=download_filename
             )
@@ -824,11 +842,6 @@ def yamlprocess():
             if temp_js_file_path and os.path.exists(temp_js_file_path):
                 try:
                     os.remove(temp_js_file_path)
-                except OSError:
-                    pass
-            if temp_yaml_file_path and os.path.exists(temp_yaml_file_path):
-                try:
-                    os.remove(temp_yaml_file_path)
                 except OSError:
                     pass
 
@@ -852,4 +865,9 @@ def yamlprocess():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=19527)
+    import sys
+    if sys.platform == "win32":
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=19527)
+    else:
+        app.run(host="0.0.0.0", port=19527)
