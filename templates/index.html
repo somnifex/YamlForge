@@ -476,11 +476,6 @@
 
             const formData = new FormData(YamlListForm);
 
-            // Add resolve_domains and max_depth to the form data
-            formData.append('resolve_domains', document.getElementById('resolve-domains').value);
-            const maxDepthValue = parseInt(document.getElementById('max-depth').value);
-            formData.append('max_depth', maxDepthValue);
-
             const url = `/listget?${new URLSearchParams(formData).toString()}`;
 
             try {

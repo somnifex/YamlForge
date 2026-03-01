@@ -5,3 +5,4 @@ Flask
 PyGithub
 gunicorn
 dnspython
+urllib3

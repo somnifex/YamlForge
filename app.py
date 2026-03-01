@@ -18,6 +18,141 @@ import re
 import time
 import uuid
 import http.client
+import base64
+import urllib3
+
+# 禁用 SSL 警告（DoH 解析时需要验证 SSL 证书）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
+    """
+    使用 DoH (DNS over HTTPS) 解析域名
+
+    Args:
+        domain: 要解析的域名
+        doh_url: DoH 服务器 URL (如 https://dns.google/dns-query)
+        dns_servers: 用于解析 DoH 域名的 DNS 服务器列表
+        record_types: 要查询的记录类型列表，默认为 ['A', 'AAAA']
+
+    Returns:
+        list: 解析到的 IP 地址列表
+    """
+    if record_types is None:
+        record_types = ['A', 'AAAA']
+
+    results = set()
+
+    # 解析 DoH 服务器的域名
+    doh_domain = doh_url.split('/')[2]
+    doh_ips = []
+
+    # 首先尝试使用提供的 DNS 服务器解析 DoH 域名
+    if dns_servers:
+        for dns_server in dns_servers:
+            if is_doh_server(dns_server):
+                continue  # 跳过 DoH 服务器本身
+            try:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [dns_server]
+                resolver.lifetime = DNS_RESOLVER_LIFETIME
+                resolver.timeout = DNS_RESOLVER_TIMEOUT
+
+                for record_type in ['A', 'AAAA']:
+                    try:
+                        answers = resolver.resolve(doh_domain, record_type)
+                        for rdata in answers:
+                            ip = rdata.to_text()
+                            if ip not in doh_ips:
+                                doh_ips.append(ip)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    # 如果没有解析到 IP，使用系统 DNS
+    if not doh_ips:
+        try:
+            addr_info = socket.getaddrinfo(doh_domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for info in addr_info:
+                ip = info[4][0]
+                if ip not in doh_ips:
+                    doh_ips.append(ip)
+        except Exception as e:
+            print(f"Failed to resolve DoH server {doh_domain}: {e}")
+            return list(results)
+
+    # 使用解析到的 IP 发送 DoH 请求
+    session = requests.Session()
+
+    for doh_ip in doh_ips:
+        try:
+            # 构建请求 URL，使用 IP 作为 Host
+            parsed_url = doh_url.split('/')
+            scheme = parsed_url[0]
+            is_https = scheme == 'https:'
+
+            if is_https:
+                # 对于 HTTPS，我们需要发送 SNI 为原始域名
+                # 这里我们使用 requests 的 verify=False 并手动设置 Host 头
+                for record_type in record_types:
+                    try:
+                        # 构建 DoH 查询参数
+                        query_params = {
+                            'name': domain,
+                            'type': record_type
+                        }
+
+                        headers = {
+                            'Host': doh_domain,
+                            'Accept': 'application/dns-json'
+                        }
+
+                        # 使用 IP 地址但设置正确的 Host 头
+                        ip_url = f"{scheme}//{doh_ip}/{'/'.join(parsed_url[3:])}"
+
+                        response = session.get(
+                            ip_url,
+                            params=query_params,
+                            headers=headers,
+                            timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                            verify=False
+                        )
+
+                        if response.status_code == 200:
+                            data = response.json()
+                            if 'Answer' in data:
+                                for answer in data['Answer']:
+                                    if answer['type'] == 1 or answer['type'] == 28:  # A or AAAA
+                                        ip = answer['data']
+                                        if not is_private_ip(ip):
+                                            results.add(ip)
+                    except Exception as e:
+                        print(f"DoH query failed for {domain} ({record_type}): {e}")
+                        continue
+
+        except Exception as e:
+            print(f"DoH request to {doh_ip} failed: {e}")
+            continue
+
+    return list(results)
+
+
+def is_doh_server(server):
+    """检查服务器是否是 DoH 服务器（以 https:// 开头）"""
+    return isinstance(server, str) and server.startswith(('https://', 'http://'))
+
+
+def filter_doh_servers(servers):
+    """从服务器列表中筛选出 DoH 服务器"""
+    doh_servers = []
+    udp_servers = []
+    for server in servers:
+        if is_doh_server(server):
+            doh_servers.append(server)
+        else:
+            udp_servers.append(server)
+    return doh_servers, udp_servers
 
 APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "yamlforge_temp")
 if not os.path.exists(APP_TEMP_DIR):
@@ -110,7 +245,7 @@ try:
     env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"], shell=True).decode().strip()
 except Exception:
     env["NODE_PATH"] = ""
-API_KEYS = os.environ.get("API_KEY", "").split(",")
+API_KEYS = [k.strip() for k in os.environ.get("API_KEY", "").split(",") if k.strip()]
 
 
 def extract_servers(data, field=None, max_depth=8):
@@ -127,6 +262,8 @@ def extract_servers(data, field=None, max_depth=8):
 
     def extract_from_dict(data, depth=0):
         if depth > max_depth:
+            return
+        if not isinstance(data, dict):
             return
         for key, value in data.items():
             if isinstance(value, str):
@@ -235,17 +372,26 @@ def is_private_ip(ip_address):
 
 
 def resolve_domain_recursive(domain, dns_servers, max_depth=8):
+    """
+    递归解析域名，支持 UDP DNS 和 DoH (DNS over HTTPS)
+
+    Args:
+        domain: 要解析的域名
+        dns_servers: DNS 服务器列表（支持 UDP DNS IP 地址和 DoH URL）
+        max_depth: 最大递归深度
+
+    Returns:
+        list: 解析结果列表
+    """
     unique_servers = set()
     results = []
 
-    def resolve_single(domain, record_type, dns_servers, depth):
+    # 分离 DoH 服务器和 UDP DNS 服务器
+    doh_servers, udp_servers = filter_doh_servers(dns_servers)
+
+    def resolve_single(domain, record_type, udp_servers, doh_servers, depth):
         if depth >= max_depth:
             return []
-
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = dns_servers
-        resolver.lifetime = DNS_RESOLVER_LIFETIME
-        resolver.timeout = DNS_RESOLVER_TIMEOUT
 
         resolved_items = []
 
@@ -253,40 +399,60 @@ def resolve_domain_recursive(domain, dns_servers, max_depth=8):
             unique_servers.add(domain)
             resolved_items.append(f"DOMAIN:{domain}")
 
-        try:
-            answers = resolver.resolve(domain, record_type)
-            for rdata in answers:
-                ip_or_cname = rdata.to_text().strip(".")
-                if ip_or_cname not in unique_servers:
-                    unique_servers.add(ip_or_cname)
-                    if record_type == "CNAME":
-                        resolved_items.append(f"DOMAIN:{ip_or_cname}")
-                        resolved_items.extend(
-                            resolve_single(ip_or_cname, "A", dns_servers, depth + 1)
-                        )
-                        resolved_items.extend(
-                            resolve_single(ip_or_cname, "AAAA", dns_servers, depth + 1)
-                        )
+        # 首先尝试使用 DoH 服务器解析
+        for doh_url in doh_servers:
+            try:
+                ips = resolve_doh(domain, doh_url, dns_servers)
+                for ip in ips:
+                    if ip not in unique_servers:
+                        unique_servers.add(ip)
+                        if not is_private_ip(ip):
+                            resolved_items.append(ip)
+            except Exception as e:
+                print(f"DoH resolution failed for {domain} via {doh_url}: {e}")
+                continue
 
-                    elif not is_private_ip(ip_or_cname):
-                        resolved_items.append(ip_or_cname)
-        except (
-            dns.resolver.NoAnswer,
-            dns.resolver.NXDOMAIN,
-            dns.resolver.NoNameservers,
-            dns.exception.Timeout,
-            dns.resolver.LifetimeTimeout,
-        ):
-            pass
-        except Exception as e:
-            print(f"Unexpected error resolving {domain} ({record_type}): {e}")
-            pass
+        # 然后尝试使用 UDP DNS 服务器解析
+        if udp_servers:
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = udp_servers
+            resolver.lifetime = DNS_RESOLVER_LIFETIME
+            resolver.timeout = DNS_RESOLVER_TIMEOUT
+
+            try:
+                answers = resolver.resolve(domain, record_type)
+                for rdata in answers:
+                    ip_or_cname = rdata.to_text().strip(".")
+                    if ip_or_cname not in unique_servers:
+                        unique_servers.add(ip_or_cname)
+                        if record_type == "CNAME":
+                            resolved_items.append(f"DOMAIN:{ip_or_cname}")
+                            resolved_items.extend(
+                                resolve_single(ip_or_cname, "A", udp_servers, doh_servers, depth + 1)
+                            )
+                            resolved_items.extend(
+                                resolve_single(ip_or_cname, "AAAA", udp_servers, doh_servers, depth + 1)
+                            )
+
+                        elif not is_private_ip(ip_or_cname):
+                            resolved_items.append(ip_or_cname)
+            except (
+                dns.resolver.NoAnswer,
+                dns.resolver.NXDOMAIN,
+                dns.resolver.NoNameservers,
+                dns.exception.Timeout,
+                dns.resolver.LifetimeTimeout,
+            ):
+                pass
+            except Exception as e:
+                print(f"Unexpected error resolving {domain} ({record_type}): {e}")
+                pass
 
         return resolved_items
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
-            executor.submit(resolve_single, domain, record_type, dns_servers, 0)
+            executor.submit(resolve_single, domain, record_type, udp_servers, doh_servers, 0)
             for record_type in ["A", "AAAA", "CNAME"]
         ]
         for future in concurrent.futures.as_completed(futures):
@@ -421,6 +587,9 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     ) as temp_processed_yaml:
         temp_processed_yaml_path = temp_processed_yaml.name
 
+    safe_yaml_path = yaml_file_path.replace('\\', '/')
+    safe_temp_path = temp_processed_yaml_path.replace('\\', '/')
+
     node_script = f"""
     const fs = require('fs');
     const yaml = require('js-yaml');
@@ -429,7 +598,7 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     {js_code}
 
     function processYaml() {{
-        const yamlInput = fs.readFileSync('{yaml_file_path}');
+        const yamlInput = fs.readFileSync('{safe_yaml_path}');
         let yamlStr = iconv.decode(yamlInput, 'utf-8');
         
         if (yamlStr.charCodeAt(0) === 0xFEFF) {{
@@ -439,7 +608,7 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
         const config = yaml.load(yamlStr);
         const modifiedConfig = main(config);
         const output = yaml.dump(modifiedConfig, {{ encoding: 'utf-8' }});
-        fs.writeFileSync('{temp_processed_yaml_path}', output, 'utf-8');
+        fs.writeFileSync('{safe_temp_path}', output, 'utf-8');
     }}
 
     processYaml();
@@ -572,6 +741,8 @@ def listget():
             dns_servers = ["223.5.5.5", "8.8.8.8"]
 
         for dns_server in dns_servers:
+            if is_doh_server(dns_server):
+                continue
             socket.getaddrinfo(dns_server, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
 
         temp_filename = generate_server_list(
@@ -652,6 +823,11 @@ def yamlprocess():
             if temp_js_file_path and os.path.exists(temp_js_file_path):
                 try:
                     os.remove(temp_js_file_path)
+                except OSError:
+                    pass
+            if temp_yaml_file_path and os.path.exists(temp_yaml_file_path):
+                try:
+                    os.remove(temp_yaml_file_path)
                 except OSError:
                     pass
 
