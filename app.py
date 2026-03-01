@@ -43,15 +43,14 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
 
     results = set()
 
-    # 解析 DoH 服务器的域名
-    doh_domain = doh_url.split('/')[2]
+    doh_domain_raw = doh_url.split('/')[2]
+    doh_domain = doh_domain_raw.strip('[]') 
     doh_ips = []
 
-    # 首先尝试使用提供的 DNS 服务器解析 DoH 域名
     if dns_servers:
         for dns_server in dns_servers:
             if is_doh_server(dns_server):
-                continue  # 跳过 DoH 服务器本身
+                continue
             try:
                 resolver = dns.resolver.Resolver()
                 resolver.nameservers = [dns_server]
@@ -70,7 +69,6 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
             except Exception:
                 pass
 
-    # 如果没有解析到 IP，使用系统 DNS
     if not doh_ips:
         try:
             addr_info = socket.getaddrinfo(doh_domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
@@ -82,64 +80,65 @@ def resolve_doh(domain, doh_url, dns_servers=None, record_types=None):
             print(f"Failed to resolve DoH server {doh_domain}: {e}")
             return list(results)
 
-    # 使用解析到的 IP 发送 DoH 请求
-    session = requests.Session()
-
-    for doh_ip in doh_ips:
+    def _ip_version(ip):
         try:
-            # 构建请求 URL，使用 IP 作为 Host
-            parsed_url = doh_url.split('/')
-            scheme = parsed_url[0]
-            is_https = scheme == 'https:'
+            return ipaddress.ip_address(ip).version
+        except ValueError:
+            return 4 
+    doh_ips_v4 = [ip for ip in doh_ips if _ip_version(ip) == 4]
+    doh_ips_v6 = [ip for ip in doh_ips if _ip_version(ip) == 6]
 
-            if is_https:
-                # 对于 HTTPS，我们需要发送 SNI 为原始域名
-                # 这里我们使用 requests 的 verify=False 并手动设置 Host 头
-                for record_type in record_types:
-                    try:
-                        # 构建 DoH 查询参数
-                        query_params = {
-                            'name': domain,
-                            'type': record_type
-                        }
+    session = requests.Session()
+    parsed_url = doh_url.split('/')
+    scheme = parsed_url[0]
+    is_https = scheme == 'https:'
 
-                        headers = {
-                            'Host': doh_domain,
-                            'Accept': 'application/dns-json'
-                        }
+    def _query_ip(doh_ip):
+        ip_results = set()
+        if not is_https:
+            return ip_results
+        try:
+            ip_obj = ipaddress.ip_address(doh_ip)
+            doh_ip_in_url = f"[{doh_ip}]" if ip_obj.version == 6 else doh_ip
+        except ValueError:
+            doh_ip_in_url = doh_ip
+        ip_url = f"{scheme}//{doh_ip_in_url}/{'/'.join(parsed_url[3:])}"
+        for record_type in record_types:
+            try:
+                query_params = {'name': domain, 'type': record_type}
+                headers = {'Host': doh_domain, 'Accept': 'application/dns-json'}
+                response = session.get(
+                    ip_url,
+                    params=query_params,
+                    headers=headers,
+                    timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                    verify=False
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'Answer' in data:
+                        for answer in data['Answer']:
+                            if answer['type'] in (1, 28):  # A or AAAA
+                                ip = answer['data']
+                                if not is_private_ip(ip):
+                                    ip_results.add(ip)
+            except Exception as e:
+                print(f"DoH query failed for {domain} ({record_type}): {e}")
+        return ip_results
 
-                        # 使用 IP 地址但设置正确的 Host 头
-                        ip_url = f"{scheme}//{doh_ip}/{'/'.join(parsed_url[3:])}"
+    for doh_ip in doh_ips_v4:
+        results.update(_query_ip(doh_ip))
 
-                        response = session.get(
-                            ip_url,
-                            params=query_params,
-                            headers=headers,
-                            timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
-                            verify=False
-                        )
-
-                        if response.status_code == 200:
-                            data = response.json()
-                            if 'Answer' in data:
-                                for answer in data['Answer']:
-                                    if answer['type'] == 1 or answer['type'] == 28:  # A or AAAA
-                                        ip = answer['data']
-                                        if not is_private_ip(ip):
-                                            results.add(ip)
-                    except Exception as e:
-                        print(f"DoH query failed for {domain} ({record_type}): {e}")
-                        continue
-
-        except Exception as e:
-            print(f"DoH request to {doh_ip} failed: {e}")
-            continue
+    if not results:
+        for doh_ip in doh_ips_v6:
+            results.update(_query_ip(doh_ip))
+            if results:
+                break
 
     return list(results)
 
 
 def is_doh_server(server):
-    """检查服务器是否是 DoH 服务器（以 https:// 开头）"""
     return isinstance(server, str) and server.startswith(('https://', 'http://'))
 
 
