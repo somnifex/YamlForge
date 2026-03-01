@@ -241,10 +241,11 @@ def download_file(url, destination_path=None, proxies=None):
 app = Flask(__name__, static_folder="assets", static_url_path="/assets")
 
 env = os.environ.copy()
-try:
-    env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"], shell=True).decode().strip()
-except Exception:
-    env["NODE_PATH"] = ""
+if not env.get("NODE_PATH"):
+    try:
+        env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"], shell=True).decode().strip()
+    except Exception:
+        env["NODE_PATH"] = ""
 API_KEYS = [k.strip() for k in os.environ.get("API_KEY", "").split(",") if k.strip()]
 
 

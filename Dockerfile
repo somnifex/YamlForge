@@ -1,23 +1,22 @@
-FROM python:3.12-slim-bookworm
+FROM node:20-alpine AS node-builder
+RUN npm install -g js-yaml iconv-lite && rm -rf /root/.npm /tmp/*
+
+FROM python:3.12-alpine
 
 WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN apt-get update && apt-get install -y \
-    curl \
-    nodejs \
-    npm \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=node-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
-RUN npm install -g js-yaml iconv-lite
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 COPY . /app
 
 EXPOSE 19527
 
-# 设置环境变量 API_KEY
 ENV API_KEY=""
 ENV GUNICORN_TIMEOUT=300
 
