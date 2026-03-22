@@ -182,33 +182,6 @@ if not env.get("NODE_PATH"):
         env["NODE_PATH"] = ""
 API_KEYS = [k.strip() for k in os.environ.get("API_KEY", "").split(",") if k.strip()]
 
-STRING_FIRST_DISABLED_TAGS = {
-    "tag:yaml.org,2002:bool",
-    "tag:yaml.org,2002:float",
-    "tag:yaml.org,2002:int",
-    "tag:yaml.org,2002:null",
-    "tag:yaml.org,2002:timestamp",
-}
-
-
-class StringFirstSafeLoader(yaml.SafeLoader):
-    pass
-
-
-StringFirstSafeLoader.yaml_implicit_resolvers = {
-    first_char: [
-        (tag, regexp)
-        for tag, regexp in resolvers
-        if tag not in STRING_FIRST_DISABLED_TAGS
-    ]
-    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
-
-
-def load_yaml_preserving_strings(stream):
-    return yaml.load(stream, Loader=StringFirstSafeLoader)
-
-
 def extract_servers(data, field=None, max_depth=8):
     servers = set()
     domain_pattern = re.compile(
@@ -546,14 +519,80 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     const iconv = require('iconv-lite');
     const yamlRoot = path.dirname(require.resolve('js-yaml'));
     const loadYamlType = (typeName) => require(path.join(yamlRoot, 'lib', 'type', typeName));
-    const STRING_FIRST_SCHEMA = yaml.FAILSAFE_SCHEMA.extend({{
-        implicit: [loadYamlType('merge')],
-        explicit: [
+    const common = require(path.join(yamlRoot, 'lib', 'common'));
+    const YAML_FLOAT_PATTERN = new RegExp(
+        '^(?:[-+]?(?:[0-9][0-9_]*)\\\\.[0-9_]*(?:[eE][-+]?[0-9]+)?' +
+        '|\\\\.[0-9_]+(?:[eE][-+]?[0-9]+)?' +
+        '|[-+]?\\\\.(?:inf|Inf|INF)' +
+        '|\\\\.(?:nan|NaN|NAN))$'
+    );
+
+    function resolveYamlFloat(data) {{
+        return data !== null && YAML_FLOAT_PATTERN.test(data) && data[data.length - 1] !== '_';
+    }}
+
+    function constructYamlFloat(data) {{
+        let value = data.replace(/_/g, '').toLowerCase();
+        let sign = value[0] === '-' ? -1 : 1;
+
+        if ('+-'.includes(value[0])) {{
+            value = value.slice(1);
+        }}
+
+        if (value === '.inf') {{
+            return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+        }}
+        if (value === '.nan') {{
+            return NaN;
+        }}
+        return sign * parseFloat(value, 10);
+    }}
+
+    function representYamlFloat(object, style) {{
+        if (isNaN(object)) {{
+            if (style === 'uppercase') return '.NAN';
+            if (style === 'camelcase') return '.NaN';
+            return '.nan';
+        }}
+        if (object === Number.POSITIVE_INFINITY) {{
+            if (style === 'uppercase') return '.INF';
+            if (style === 'camelcase') return '.Inf';
+            return '.inf';
+        }}
+        if (object === Number.NEGATIVE_INFINITY) {{
+            if (style === 'uppercase') return '-.INF';
+            if (style === 'camelcase') return '-.Inf';
+            return '-.inf';
+        }}
+        if (common.isNegativeZero(object)) {{
+            return '-0.0';
+        }}
+
+        const rendered = object.toString(10);
+        return /^[-+]?[0-9]+e/.test(rendered) ? rendered.replace('e', '.e') : rendered;
+    }}
+
+    const STRICT_FLOAT_TYPE = new yaml.Type('tag:yaml.org,2002:float', {{
+        kind: 'scalar',
+        resolve: resolveYamlFloat,
+        construct: constructYamlFloat,
+        predicate: (object) =>
+            Object.prototype.toString.call(object) === '[object Number]' &&
+            (object % 1 !== 0 || common.isNegativeZero(object)),
+        represent: representYamlFloat,
+        defaultStyle: 'lowercase'
+    }});
+
+    const STRING_SAFE_SCHEMA = yaml.FAILSAFE_SCHEMA.extend({{
+        implicit: [
             loadYamlType('null'),
             loadYamlType('bool'),
             loadYamlType('int'),
-            loadYamlType('float'),
+            STRICT_FLOAT_TYPE,
             loadYamlType('timestamp'),
+            loadYamlType('merge')
+        ],
+        explicit: [
             loadYamlType('binary'),
             loadYamlType('omap'),
             loadYamlType('pairs'),
@@ -571,7 +610,7 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
             yamlStr = yamlStr.slice(1);
         }}
 
-        const config = yaml.load(yamlStr, {{ schema: STRING_FIRST_SCHEMA }});
+        const config = yaml.load(yamlStr, {{ schema: STRING_SAFE_SCHEMA }});
         const modifiedConfig = main(config);
         const output = yaml.dump(modifiedConfig, {{ encoding: 'utf-8' }});
         fs.writeFileSync('{safe_temp_path}', output, 'utf-8');
@@ -644,7 +683,7 @@ def listget():
         try:
             temp_source_path = download_file(source, proxies=proxies)
             with open(temp_source_path, "r", encoding="utf-8") as f:
-                data = load_yaml_preserving_strings(f)
+                data = yaml.safe_load(f)
         except requests.exceptions.Timeout:
             return jsonify({"error": "Request timed out while fetching source"}), 408
         except requests.exceptions.SSLError:
