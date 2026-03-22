@@ -182,6 +182,32 @@ if not env.get("NODE_PATH"):
         env["NODE_PATH"] = ""
 API_KEYS = [k.strip() for k in os.environ.get("API_KEY", "").split(",") if k.strip()]
 
+STRING_FIRST_DISABLED_TAGS = {
+    "tag:yaml.org,2002:bool",
+    "tag:yaml.org,2002:float",
+    "tag:yaml.org,2002:int",
+    "tag:yaml.org,2002:null",
+    "tag:yaml.org,2002:timestamp",
+}
+
+
+class StringFirstSafeLoader(yaml.SafeLoader):
+    pass
+
+
+StringFirstSafeLoader.yaml_implicit_resolvers = {
+    first_char: [
+        (tag, regexp)
+        for tag, regexp in resolvers
+        if tag not in STRING_FIRST_DISABLED_TAGS
+    ]
+    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
+def load_yaml_preserving_strings(stream):
+    return yaml.load(stream, Loader=StringFirstSafeLoader)
+
 
 def extract_servers(data, field=None, max_depth=8):
     servers = set()
@@ -515,8 +541,25 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
 
     node_script = f"""
     const fs = require('fs');
+    const path = require('path');
     const yaml = require('js-yaml');
     const iconv = require('iconv-lite');
+    const yamlRoot = path.dirname(require.resolve('js-yaml'));
+    const loadYamlType = (typeName) => require(path.join(yamlRoot, 'lib', 'type', typeName));
+    const STRING_FIRST_SCHEMA = yaml.FAILSAFE_SCHEMA.extend({{
+        implicit: [loadYamlType('merge')],
+        explicit: [
+            loadYamlType('null'),
+            loadYamlType('bool'),
+            loadYamlType('int'),
+            loadYamlType('float'),
+            loadYamlType('timestamp'),
+            loadYamlType('binary'),
+            loadYamlType('omap'),
+            loadYamlType('pairs'),
+            loadYamlType('set')
+        ]
+    }});
 
     {js_code}
 
@@ -528,7 +571,7 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
             yamlStr = yamlStr.slice(1);
         }}
 
-        const config = yaml.load(yamlStr);
+        const config = yaml.load(yamlStr, {{ schema: STRING_FIRST_SCHEMA }});
         const modifiedConfig = main(config);
         const output = yaml.dump(modifiedConfig, {{ encoding: 'utf-8' }});
         fs.writeFileSync('{safe_temp_path}', output, 'utf-8');
@@ -601,7 +644,7 @@ def listget():
         try:
             temp_source_path = download_file(source, proxies=proxies)
             with open(temp_source_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                data = load_yaml_preserving_strings(f)
         except requests.exceptions.Timeout:
             return jsonify({"error": "Request timed out while fetching source"}), 408
         except requests.exceptions.SSLError:
