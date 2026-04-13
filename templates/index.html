@@ -281,8 +281,8 @@
 </head>
 
 <body>
-    <a href="https://github.com/somnifex/yamlforge" class="github-corner" aria-label="View source on GitHub"
-        target="_blank" title="View Code on GitHub">
+    <a href="https://github.com/somnifex/yamlforge" class="github-corner" aria-label="在 GitHub 查看源码"
+        target="_blank" rel="noreferrer" title="在 GitHub 查看源码">
         <svg width="80" height="80" viewBox="0 0 250 250"
             style="fill:#151513; color:#fff; position: absolute; top: 0; border: 0; right: 0;" aria-hidden="true">
             <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
@@ -312,66 +312,68 @@
         </div>
 
         <div id="serverlist" class="tab-content active">
-            <form id="YamlListForm">
-                <label for="api_key">API Key:</label>
+            <form id="yamlListForm">
+                <label for="api_key">API 密钥：</label>
                 <input type="password" id="api_key" name="api_key">
 
-                <label for="source">YAML 源地址:</label>
+                <label for="source">YAML 文件地址：</label>
                 <input type="text" id="source" name="source"
                     placeholder="例如：https://raw.githubusercontent.com/xxx/xxx/main/xxx.yaml" required>
 
-                <label for="field">提取内容:</label>
-                <input type="text" id="field" name="field" placeholder="general.name" value="general.name">
+                <label for="field">提取字段：</label>
+                <input type="text" id="field" name="field" placeholder="proxies.server" value="proxies.server">
 
-                <label for="resolve-domains">解析域名:</label>
+                <label for="resolve-domains">自动解析域名：</label>
                 <select id="resolve-domains" name="resolve_domains">
                     <option value="false">否</option>
                     <option value="true">是</option>
                 </select>
 
-                <label for="max-depth">最大递归深度:</label>
+                <label for="max-depth">最大递归深度：</label>
                 <input type="number" id="max-depth" name="max_depth" value="8" min="1" max="20">
 
-                <label for="dns-options">提取网址自定义DNS:</label>
+                <label for="dns-options">使用自定义 DNS：</label>
                 <select id="dns-options" name="dns-options">
                     <option value="no">否</option>
                     <option value="yes">是</option>
                 </select>
                 <div id="dns-details" style="display: none;">
-                    <label for="dns_servers">DNS 服务器 (留空默认223.5.5.5和8.8.8.8):</label>
+                    <label for="dns_servers">DNS 服务器（留空时使用 223.5.5.5 和 8.8.8.8，支持 8.138.94.132:8053、[2400:3200::1]:8053
+                        或 DoH URL）：</label>
                     <div id="dns-servers-container">
                         <div class="dns-server-input">
-                            <input type="text" name="dns_servers" placeholder="例如：223.5.5.5" value="223.5.5.5,8.8.8.8">
+                            <input type="text" name="dns_servers" placeholder="例如：223.5.5.5 或 8.138.94.132:8053"
+                                value="223.5.5.5,8.8.8.8">
                             <button type="button" class="remove-dns-server">-</button>
                         </div>
                     </div>
-                    <button type="button" id="add-dns-server">+ 添加 DNS 服务器</button>
+                    <button type="button" id="add-dns-server">+ 新增 DNS 服务器</button>
                 </div>
 
-                <label for="github-options">上传到 GitHub:</label>
+                <label for="github-options">上传到 GitHub：</label>
                 <select id="github-options" name="github-options">
                     <option value="no">否</option>
                     <option value="yes">是</option>
                 </select>
 
                 <div id="github-details" style="display: none;">
-                    <label for="repo">GitHub 仓库名称:</label>
+                    <label for="repo">仓库名：</label>
                     <input type="text" id="repo" name="repo" placeholder="例如：username/repo">
 
-                    <label for="token">GitHub 个人访问令牌:</label>
+                    <label for="token">个人访问令牌：</label>
                     <input type="password" id="token" name="token">
 
-                    <label for="branch">GitHub 分支 (默认: main):</label>
+                    <label for="branch">分支（默认 main）：</label>
                     <input type="text" id="branch" name="branch" value="main">
 
-                    <label for="path">GitHub 路径 (默认: 根目录):</label>
+                    <label for="path">目录（默认根目录）：</label>
                     <input type="text" id="path" name="path">
                 </div>
 
-                <label for="filename">文件名 (默认: yaml.list):</label>
+                <label for="filename">输出文件名（默认 yaml.list）：</label>
                 <input type="text" id="filename" name="filename" value="yaml.list">
 
-                <label for="proxy">代理 (可选):</label>
+                <label for="proxy">代理（可选）：</label>
                 <input type="text" id="proxy" name="proxy"
                     placeholder="例如：socks5://127.0.0.1:1080 或 http://127.0.0.1:8080">
 
@@ -381,21 +383,21 @@
 
         <div id="yamlprocess" class="tab-content">
             <form id="yamlProcessForm">
-                <label for="yaml_api_key">API Key:</label>
+                <label for="yaml_api_key">API 密钥：</label>
                 <input type="password" id="yaml_api_key" name="api_key">
 
-                <label for="yaml-source">YAML 源地址:</label>
+                <label for="yaml-source">YAML 文件地址：</label>
                 <input type="text" id="yaml-source" name="source"
                     placeholder="例如：https://raw.githubusercontent.com/xxx/xxx/main/xxx.yaml" required>
 
-                <label for="merge-url">合并 JS 文件 URL:</label>
+                <label for="merge-url">合并脚本地址：</label>
                 <input type="text" id="merge-url" name="merge"
                     placeholder="例如：https://raw.githubusercontent.com/xxx/xxx/main/merge.js" required>
 
-                <label for="yaml-filename">输出文件名:</label>
+                <label for="yaml-filename">输出文件名：</label>
                 <input type="text" id="yaml-filename" name="filename" placeholder="例如：processed.yaml">
 
-                <label for="yaml-proxy">代理 (可选):</label>
+                <label for="yaml-proxy">代理（可选）：</label>
                 <input type="text" id="yaml-proxy" name="proxy"
                     placeholder="例如：socks5://127.0.0.1:1080 或 http://127.0.0.1:8080">
 
@@ -408,32 +410,18 @@
 
     <footer class="footer">
         <div class="footer-content">
-            <p>&copy; 2024 YamlForge. All rights reserved.</p>
-            <p>Created by <a href="https://github.com/somnifex" target="_blank">somnifex</a></p>
-            <p>Licensed under the <a href="https://www.gnu.org/licenses/gpl-3.0.en.html" target="_blank">GNU General
+            <p>&copy; 2024 YamlForge</p>
+            <p>作者：<a href="https://github.com/somnifex" target="_blank" rel="noreferrer">somnifex</a></p>
+            <p>许可证：<a href="https://www.gnu.org/licenses/gpl-3.0.en.html" target="_blank" rel="noreferrer">GNU General
                     Public License v3.0</a></p>
         </div>
     </footer>
 
     <script>
-        // Tab switching logic
         const tabs = document.querySelectorAll('.tab');
         const tabContents = document.querySelectorAll('.tab-content');
-
-        tabs.forEach(tab => {
-            tab.addEventListener('click', () => {
-                const tabId = tab.getAttribute('data-tab');
-
-                tabs.forEach(t => t.classList.remove('active'));
-                tabContents.forEach(content => content.classList.remove('active'));
-
-                tab.classList.add('active');
-                document.getElementById(tabId).classList.add('active');
-            });
-        });
-
-        // Server List Form Logic
-        const YamlListForm = document.getElementById('YamlListForm');
+        const yamlListForm = document.getElementById('yamlListForm');
+        const yamlProcessForm = document.getElementById('yamlProcessForm');
         const resultDiv = document.getElementById('result');
         const dnsOptionsSelect = document.getElementById('dns-options');
         const dnsDetailsDiv = document.getElementById('dns-details');
@@ -441,19 +429,85 @@
         const addDnsServerButton = document.getElementById('add-dns-server');
         const githubOptionsSelect = document.getElementById('github-options');
         const githubDetailsDiv = document.getElementById('github-details');
+        const themeSwitch = document.getElementById('themeSwitch');
+        const prefersDarkScheme = window.matchMedia('(prefers-color-scheme: dark)');
+
+        tabs.forEach((tab) => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.getAttribute('data-tab');
+
+                tabs.forEach((item) => item.classList.remove('active'));
+                tabContents.forEach((content) => content.classList.remove('active'));
+
+                tab.classList.add('active');
+                document.getElementById(tabId).classList.add('active');
+            });
+        });
+
+        function setResult(message) {
+            resultDiv.textContent = message;
+        }
+
+        function toggleSection(select, section) {
+            section.style.display = select.value === 'yes' ? 'block' : 'none';
+        }
+
+        function createDnsServerInput(value = '') {
+            const wrapper = document.createElement('div');
+            const input = document.createElement('input');
+            const button = document.createElement('button');
+
+            wrapper.className = 'dns-server-input';
+            input.type = 'text';
+            input.name = 'dns_servers';
+            input.placeholder = '例如：8.8.8.8 或 https://dns.google/resolve';
+            input.value = value;
+
+            button.type = 'button';
+            button.className = 'remove-dns-server';
+            button.textContent = '-';
+            button.addEventListener('click', () => {
+                if (dnsServersContainer.querySelectorAll('.dns-server-input').length > 1) {
+                    wrapper.remove();
+                }
+            });
+
+            wrapper.append(input, button);
+            return wrapper;
+        }
+
+        async function downloadResponse(response, fallbackName) {
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+
+            link.href = blobUrl;
+            link.download = fallbackName;
+            link.click();
+
+            URL.revokeObjectURL(blobUrl);
+        }
+
+        async function parseError(response) {
+            try {
+                const errorData = await response.json();
+                return errorData.error || '请求失败，请稍后重试。';
+            } catch (error) {
+                return `请求失败：${response.status} ${response.statusText}`;
+            }
+        }
+
+        function applyTheme(theme) {
+            const icon = theme === 'dark'
+                ? '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>'
+                : '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path></svg>';
+
+            document.documentElement.setAttribute('data-theme', theme);
+            themeSwitch.innerHTML = icon;
+        }
 
         addDnsServerButton.addEventListener('click', () => {
-            const newInput = document.createElement('div');
-            newInput.classList.add('dns-server-input');
-            newInput.innerHTML = `
-                <input type="text" name="dns_servers" placeholder="例如：8.8.8.8">
-                <button type="button" class="remove-dns-server">-</button>
-            `;
-            dnsServersContainer.appendChild(newInput);
-
-            newInput.querySelector('.remove-dns-server').addEventListener('click', () => {
-                newInput.remove();
-            });
+            dnsServersContainer.appendChild(createDnsServerInput());
         });
 
         dnsServersContainer.querySelector('.remove-dns-server').addEventListener('click', (event) => {
@@ -462,110 +516,72 @@
             }
         });
 
-        dnsOptionsSelect.addEventListener('change', () => {
-            dnsDetailsDiv.style.display = dnsOptionsSelect.value === 'yes' ? 'block' : 'none';
-        });
+        dnsOptionsSelect.addEventListener('change', () => toggleSection(dnsOptionsSelect, dnsDetailsDiv));
+        githubOptionsSelect.addEventListener('change', () => toggleSection(githubOptionsSelect, githubDetailsDiv));
 
-        githubOptionsSelect.addEventListener('change', () => {
-            githubDetailsDiv.style.display = githubOptionsSelect.value === 'yes' ? 'block' : 'none';
-        });
+        toggleSection(dnsOptionsSelect, dnsDetailsDiv);
+        toggleSection(githubOptionsSelect, githubDetailsDiv);
 
-        YamlListForm.addEventListener('submit', async (event) => {
+        yamlListForm.addEventListener('submit', async (event) => {
             event.preventDefault();
-            resultDiv.innerHTML = '正在处理...';
+            setResult('正在处理，请稍候…');
 
-            const formData = new FormData(YamlListForm);
-
+            const formData = new FormData(yamlListForm);
             const url = `/listget?${new URLSearchParams(formData).toString()}`;
 
             try {
                 const response = await fetch(url);
-                if (response.ok) {
-                    if (response.headers.get('Content-Disposition')) {
-                        const blob = await response.blob();
-                        const link = document.createElement('a');
-                        link.href = URL.createObjectURL(blob);
-                        link.download = formData.get('filename') || 'yaml.list';
-                        link.click();
-                        resultDiv.innerHTML = '文件已成功生成并下载。';
-                    } else {
-                        const data = await response.json();
-                        resultDiv.innerHTML = `操作成功: ${JSON.stringify(data, null, 2)}`;
-                    }
-                } else {
-                    const errorData = await response.json();
-                    resultDiv.innerHTML = `错误: ${errorData.error}`;
+
+                if (!response.ok) {
+                    setResult(`错误：${await parseError(response)}`);
+                    return;
                 }
+
+                if (response.headers.get('Content-Disposition')) {
+                    await downloadResponse(response, formData.get('filename') || 'yaml.list');
+                    setResult('列表已生成，浏览器已开始下载。');
+                    return;
+                }
+
+                const data = await response.json();
+                setResult(`处理完成：\n${JSON.stringify(data, null, 2)}`);
             } catch (error) {
-                resultDiv.innerHTML = `错误: ${error.message}`;
+                setResult(`错误：${error.message}`);
             }
         });
 
-        // YAML Process Form Logic
-        const yamlProcessForm = document.getElementById('yamlProcessForm');
-
         yamlProcessForm.addEventListener('submit', async (event) => {
             event.preventDefault();
-            resultDiv.innerHTML = '正在处理...';
+            setResult('正在处理，请稍候…');
 
             const formData = new FormData(yamlProcessForm);
             const url = `/yamlprocess?${new URLSearchParams(formData).toString()}`;
 
             try {
                 const response = await fetch(url);
-                if (response.ok) {
-                    const blob = await response.blob();
-                    const link = document.createElement('a');
-                    link.href = URL.createObjectURL(blob);
-                    link.download = formData.get('filename') || 'processed.yaml';
-                    link.click();
-                    resultDiv.innerHTML = 'YAML 文件已成功处理并下载。';
-                } else {
-                    const errorData = await response.json();
-                    resultDiv.innerHTML = `错误: ${errorData.error}`;
+
+                if (!response.ok) {
+                    setResult(`错误：${await parseError(response)}`);
+                    return;
                 }
+
+                await downloadResponse(response, formData.get('filename') || 'processed.yaml');
+                setResult('YAML 已处理完成，浏览器已开始下载。');
             } catch (error) {
-                resultDiv.innerHTML = `错误: ${error.message}`;
+                setResult(`错误：${error.message}`);
             }
         });
 
-        // 主题切换逻辑
-        const themeSwitch = document.getElementById('themeSwitch');
-        const prefersDarkScheme = window.matchMedia('(prefers-color-scheme: dark)');
-
-        // 检查本地存储
-        const currentTheme = localStorage.getItem('theme');
-        if (currentTheme === 'dark') {
-            document.documentElement.setAttribute('data-theme', 'dark');
-            updateThemeIcon(true);
-        } else if (currentTheme === 'light') {
-            document.documentElement.setAttribute('data-theme', 'light');
-            updateThemeIcon(false);
-        } else if (prefersDarkScheme.matches) {
-            document.documentElement.setAttribute('data-theme', 'dark');
-            updateThemeIcon(true);
-        }
+        const storedTheme = localStorage.getItem('theme');
+        applyTheme(storedTheme || (prefersDarkScheme.matches ? 'dark' : 'light'));
 
         themeSwitch.addEventListener('click', () => {
-            let theme = document.documentElement.getAttribute('data-theme');
-            if (theme === 'dark') {
-                document.documentElement.setAttribute('data-theme', 'light');
-                localStorage.setItem('theme', 'light');
-                updateThemeIcon(false);
-            } else {
-                document.documentElement.setAttribute('data-theme', 'dark');
-                localStorage.setItem('theme', 'dark');
-                updateThemeIcon(true);
-            }
-        });
+            const currentTheme = document.documentElement.getAttribute('data-theme');
+            const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
 
-        function updateThemeIcon(isDark) {
-            if (isDark) {
-                themeSwitch.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
-            } else {
-                themeSwitch.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path></svg>';
-            }
-        }
+            localStorage.setItem('theme', nextTheme);
+            applyTheme(nextTheme);
+        });
     </script>
 </body>
 

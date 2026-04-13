@@ -1,82 +1,89 @@
-import subprocess
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import yaml
-import os
 import concurrent.futures
-from flask import Flask, request, jsonify, send_file, render_template
-import tempfile
-from github import Github
-import posixpath
-import socket
+import http.client
 import ipaddress
-import shutil
-import dns.resolver
-import dns.exception
+import logging
+import os
+import posixpath
 import re
+import shutil
+import socket
+import subprocess
+import tempfile
 import time
 import uuid
-import http.client
-import base64
-import urllib3
 
-# 禁用 SSL 警告
+import dns.exception
+import dns.resolver
+import requests
+import urllib3
+import yaml
+from flask import Flask, after_this_request, jsonify, render_template, request, send_file
+from github import Github
+from github.ContentFile import ContentFile
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+logger = logging.getLogger(__name__)
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def resolve_doh(domain, doh_url, dns_servers=None, record_types=None, max_depth=8):
+def resolve_doh(domain, doh_url, record_types=None, max_depth=8):
     if record_types is None:
-        record_types = ['A', 'AAAA']
+        record_types = ["A", "AAAA"]
 
-    session = requests.Session()
+    with requests.Session() as session:
+        def _query_single(qname, record_type, visited, depth=0):
+            if depth >= max_depth or qname in visited:
+                return set()
+            visited.add(qname)
 
-    def _query_single(qname, record_type, visited, depth=0):
-        if depth >= max_depth or qname in visited:
-            return set()
-        visited.add(qname)
+            ips = set()
+            cname_targets = []
 
-        ips = set()
-        cname_targets = []
-
-        try:
-            response = session.get(
-                doh_url,
-                params={'name': qname, 'type': record_type},
-                headers={'Accept': 'application/dns-json'},
-                timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
-                verify=False
-            )
-            if response.status_code == 200:
-                data = response.json()
-                for answer in data.get('Answer', []):
-                    rtype = answer.get('type')
-                    rdata = answer.get('data', '').rstrip('.')
-                    if rtype in (1, 28):  # A or AAAA
-                        if not is_private_ip(rdata):
-                            ips.add(rdata)
-                    elif rtype == 5:  # CNAME
-                        if rdata and rdata not in visited:
+            try:
+                response = session.get(
+                    doh_url,
+                    params={"name": qname, "type": record_type},
+                    headers={"Accept": "application/dns-json"},
+                    timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                    verify=False,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    for answer in data.get("Answer", []):
+                        rtype = answer.get("type")
+                        rdata = answer.get("data", "").rstrip(".")
+                        if rtype in (1, 28):
+                            if not is_private_ip(rdata):
+                                ips.add(rdata)
+                        elif rtype == 5 and rdata and rdata not in visited:
                             cname_targets.append(rdata)
-        except Exception as e:
-            print(f"DoH query failed for {qname} ({record_type}): {e}")
+            except Exception as exc:
+                logger.warning(
+                    "DoH query failed for %s (%s) via %s: %s",
+                    qname,
+                    record_type,
+                    doh_url,
+                    exc,
+                )
+                return ips
+
+            if not ips:
+                for target in cname_targets:
+                    ips.update(_query_single(target, record_type, visited, depth + 1))
+
             return ips
-        
-        if not ips:
-            for target in cname_targets:
-                ips.update(_query_single(target, record_type, visited, depth + 1))
 
-        return ips
-
-    results = set()
-    for record_type in record_types:
-        results.update(_query_single(domain, record_type, set()))
+        results = set()
+        for record_type in record_types:
+            results.update(_query_single(domain, record_type, set()))
 
     return list(results)
 
 
 def is_doh_server(server):
-    return isinstance(server, str) and server.startswith(('https://', 'http://'))
+    return isinstance(server, str) and server.startswith(("https://", "http://"))
 
 
 def filter_doh_servers(servers):
@@ -86,12 +93,102 @@ def filter_doh_servers(servers):
         if is_doh_server(server):
             doh_servers.append(server)
         else:
-            udp_servers.append(server)
+            udp_servers.append(parse_udp_dns_server(server))
     return doh_servers, udp_servers
 
+
+DEFAULT_DNS_SERVERS = ["223.5.5.5", "8.8.8.8"]
+
+
+def normalize_dns_server_entries(values):
+    normalized_servers = []
+    seen_servers = set()
+
+    for value in values or []:
+        if value is None:
+            continue
+
+        for entry in str(value).split(","):
+            server = entry.strip()
+            if server and server not in seen_servers:
+                seen_servers.add(server)
+                normalized_servers.append(server)
+
+    return normalized_servers
+
+
+def parse_dns_server_port(port_str, server):
+    try:
+        port = int(str(port_str).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid DNS server '{server}': port must be an integer between 1 and 65535."
+        ) from exc
+
+    if not 1 <= port <= 65535:
+        raise ValueError(
+            f"Invalid DNS server '{server}': port must be between 1 and 65535."
+        )
+
+    return port
+
+
+def parse_udp_dns_server(server):
+    if not isinstance(server, str):
+        raise ValueError("DNS server must be a string.")
+
+    candidate = server.strip()
+    if not candidate:
+        raise ValueError("DNS server cannot be empty.")
+
+    if is_doh_server(candidate):
+        raise ValueError(f"DoH server '{candidate}' is not a UDP DNS server.")
+
+    if candidate.startswith("["):
+        bracket_end = candidate.find("]")
+        if bracket_end == -1:
+            raise ValueError(
+                f"Invalid DNS server '{candidate}': missing closing ']' for IPv6 address."
+            )
+
+        host = candidate[1:bracket_end].strip()
+        remainder = candidate[bracket_end + 1:].strip()
+        if not host:
+            raise ValueError(f"Invalid DNS server '{candidate}': host cannot be empty.")
+
+        if not remainder:
+            return {"host": host, "port": 53}
+
+        if not remainder.startswith(":"):
+            raise ValueError(
+                f"Invalid DNS server '{candidate}': unexpected characters after ']'."
+            )
+
+        return {"host": host, "port": parse_dns_server_port(remainder[1:], candidate)}
+
+    try:
+        return {"host": str(ipaddress.ip_address(candidate)), "port": 53}
+    except ValueError:
+        pass
+
+    host = candidate
+    port = 53
+
+    if ":" in candidate:
+        host_part, port_part = candidate.rsplit(":", 1)
+        host = host_part.strip()
+        if ":" in host:
+            raise ValueError(
+                f"Invalid DNS server '{candidate}': use [IPv6]:port when specifying a port for an IPv6 address."
+            )
+        if not host:
+            raise ValueError(f"Invalid DNS server '{candidate}': host cannot be empty.")
+        port = parse_dns_server_port(port_part, candidate)
+
+    return {"host": host, "port": port}
+
 APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "yamlforge_temp")
-if not os.path.exists(APP_TEMP_DIR):
-    os.makedirs(APP_TEMP_DIR, exist_ok=True)
+os.makedirs(APP_TEMP_DIR, exist_ok=True)
 
 FILE_CLEANUP_TIMEOUT = 3600
 
@@ -104,6 +201,16 @@ MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 10))
 DOWNLOAD_ATTEMPTS = int(os.environ.get("DOWNLOAD_ATTEMPTS", 5))
 DOWNLOAD_RETRY_WAIT = float(os.environ.get("DOWNLOAD_RETRY_WAIT", 2))
 
+
+def remove_file(path):
+    if not path or not os.path.exists(path):
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def cleanup_stale_files():
     now = time.time()
     try:
@@ -113,11 +220,12 @@ def cleanup_stale_files():
                 if os.path.isfile(file_path):
                     file_age = now - os.path.getmtime(file_path)
                     if file_age > FILE_CLEANUP_TIMEOUT:
-                        os.remove(file_path)
+                        remove_file(file_path)
             except OSError:
                 pass
-    except Exception as e:
-        print(f"Error during file cleanup: {e}")
+    except OSError as exc:
+        logger.warning("Failed to clean temporary files in %s: %s", APP_TEMP_DIR, exc)
+
 
 def download_file(url, destination_path=None, proxies=None):
     cleanup_stale_files()
@@ -125,45 +233,67 @@ def download_file(url, destination_path=None, proxies=None):
     if destination_path is None:
         destination_path = os.path.join(APP_TEMP_DIR, f"{uuid.uuid4()}.tmp")
 
-    session = requests.Session()
-    retries = Retry(total=RETRY_TOTAL, backoff_factor=RETRY_BACKOFF_FACTOR, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    session.mount("http://", HTTPAdapter(max_retries=retries))
-
+    retries = Retry(
+        total=RETRY_TOTAL,
+        backoff_factor=RETRY_BACKOFF_FACTOR,
+        status_forcelist=[500, 502, 503, 504],
+    )
     last_exception = None
-    for attempt in range(DOWNLOAD_ATTEMPTS):
-        try:
-            with session.get(url, stream=True, proxies=proxies, timeout=DOWNLOAD_TIMEOUT) as response:
-                response.raise_for_status()
-                expected_length_header = response.headers.get("content-length")
-                try:
-                    expected_length = int(expected_length_header) if expected_length_header else None
-                except ValueError:
-                    expected_length = None
-                downloaded_bytes = 0
-                with open(destination_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_bytes += len(chunk)
-                if expected_length is not None and downloaded_bytes < expected_length:
-                    raise requests.exceptions.ContentDecodingError(
-                        f"Incomplete download: expected {expected_length} bytes, got {downloaded_bytes}"
-                    )
-            return destination_path
-        except (
-            requests.exceptions.RequestException,
-            requests.exceptions.ChunkedEncodingError,
-            http.client.IncompleteRead,
-        ) as e:
-            last_exception = e
-            print(f"Download attempt {attempt + 1} failed for {url}: {e}. Retrying...")
-            if os.path.exists(destination_path):
-                try:
-                    os.remove(destination_path)
-                except OSError:
-                    pass
-            time.sleep(DOWNLOAD_RETRY_WAIT * (attempt + 1))
+
+    with requests.Session() as session:
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+        session.mount("http://", HTTPAdapter(max_retries=retries))
+
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                with session.get(
+                    url,
+                    stream=True,
+                    proxies=proxies,
+                    timeout=DOWNLOAD_TIMEOUT,
+                ) as response:
+                    response.raise_for_status()
+                    expected_length_header = response.headers.get("content-length")
+                    try:
+                        expected_length = (
+                            int(expected_length_header)
+                            if expected_length_header
+                            else None
+                        )
+                    except ValueError:
+                        expected_length = None
+
+                    downloaded_bytes = 0
+                    with open(destination_path, "wb") as file:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                file.write(chunk)
+                                downloaded_bytes += len(chunk)
+
+                    if (
+                        expected_length is not None
+                        and downloaded_bytes < expected_length
+                    ):
+                        raise requests.exceptions.ContentDecodingError(
+                            f"Incomplete download: expected {expected_length} bytes, got {downloaded_bytes}"
+                        )
+
+                return destination_path
+            except (
+                requests.exceptions.RequestException,
+                requests.exceptions.ChunkedEncodingError,
+                http.client.IncompleteRead,
+            ) as exc:
+                last_exception = exc
+                logger.warning(
+                    "Download attempt %s/%s failed for %s: %s",
+                    attempt,
+                    DOWNLOAD_ATTEMPTS,
+                    url,
+                    exc,
+                )
+                remove_file(destination_path)
+                time.sleep(DOWNLOAD_RETRY_WAIT * attempt)
 
     if isinstance(last_exception, http.client.IncompleteRead):
         raise requests.exceptions.ConnectionError(
@@ -177,10 +307,41 @@ app = Flask(__name__, static_folder="assets", static_url_path="/assets")
 env = os.environ.copy()
 if not env.get("NODE_PATH"):
     try:
-        env["NODE_PATH"] = subprocess.check_output(["npm", "root", "-g"], shell=True).decode().strip()
+        env["NODE_PATH"] = subprocess.check_output(
+            ["npm", "root", "-g"], shell=True
+        ).decode().strip()
     except Exception:
         env["NODE_PATH"] = ""
 API_KEYS = [k.strip() for k in os.environ.get("API_KEY", "").split(",") if k.strip()]
+
+
+def build_proxy_config(proxy):
+    if not proxy:
+        return {}
+    if proxy.startswith(("socks", "http")):
+        return {"http": proxy, "https": proxy}
+    raise ValueError("Invalid proxy format")
+
+
+def parse_max_depth(value, default=8):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def is_authorized_request(provided_api_key):
+    return not API_KEYS or provided_api_key in API_KEYS
+
+
+def send_download(path, download_name):
+    @after_this_request
+    def cleanup(response):
+        remove_file(path)
+        return response
+
+    return send_file(path, as_attachment=True, download_name=download_name)
+
 
 def extract_servers(data, field=None, max_depth=8):
     servers = set()
@@ -194,17 +355,22 @@ def extract_servers(data, field=None, max_depth=8):
         r"(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))"
     )
 
+    def add_server(value):
+        if (
+            ipv4_pattern.match(value)
+            or ipv6_pattern.match(value)
+            or domain_pattern.match(value)
+        ):
+            servers.add(value)
+
     def extract_from_dict(data, depth=0):
         if depth > max_depth:
             return
         if not isinstance(data, dict):
             return
-        for key, value in data.items():
+        for value in data.values():
             if isinstance(value, str):
-                if ipv4_pattern.match(value) or ipv6_pattern.match(value):
-                    servers.add(value)
-                elif domain_pattern.match(value):
-                    servers.add(value)
+                add_server(value)
             elif isinstance(value, dict):
                 extract_from_dict(value, depth + 1)
             elif isinstance(value, list):
@@ -212,10 +378,7 @@ def extract_servers(data, field=None, max_depth=8):
                     if isinstance(item, dict):
                         extract_from_dict(item, depth + 1)
                     elif isinstance(item, str):
-                        if ipv4_pattern.match(item) or ipv6_pattern.match(item):
-                            servers.add(item)
-                        elif domain_pattern.match(item):
-                            servers.add(item)
+                        add_server(item)
 
     if field:
         field_data = extract_field(data, field, max_depth=max_depth)
@@ -226,10 +389,7 @@ def extract_servers(data, field=None, max_depth=8):
                 if isinstance(item, dict):
                     extract_from_dict(item)
                 elif isinstance(item, str):
-                    if ipv4_pattern.match(item) or ipv6_pattern.match(item):
-                        servers.add(item)
-                    elif domain_pattern.match(item):
-                        servers.add(item)
+                    add_server(item)
     else:
         extract_from_dict(data)
     return list(servers)
@@ -308,80 +468,93 @@ def is_private_ip(ip_address):
 def resolve_domain_recursive(domain, dns_servers, max_depth=8):
     unique_servers = set()
     results = []
-
-    # 分离 DoH 服务器和 UDP DNS 服务器
     doh_servers, udp_servers = filter_doh_servers(dns_servers)
 
-    def resolve_single(domain, record_type, udp_servers, doh_servers, depth):
+    def resolve_single(name, record_type, depth):
         if depth >= max_depth:
             return []
 
         resolved_items = []
 
-        if domain not in unique_servers:
-            unique_servers.add(domain)
-            resolved_items.append(f"DOMAIN:{domain}")
-        
+        if name not in unique_servers:
+            unique_servers.add(name)
+            resolved_items.append(f"DOMAIN:{name}")
+
         if udp_servers:
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = udp_servers
-            resolver.lifetime = DNS_RESOLVER_LIFETIME
-            resolver.timeout = DNS_RESOLVER_TIMEOUT
+            for udp_server in udp_servers:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [udp_server["host"]]
+                resolver.port = udp_server["port"]
+                resolver.lifetime = DNS_RESOLVER_LIFETIME
+                resolver.timeout = DNS_RESOLVER_TIMEOUT
 
-            try:
-                answers = resolver.resolve(domain, record_type)
-                for rdata in answers:
-                    ip_or_cname = rdata.to_text().strip(".")
-                    if ip_or_cname not in unique_servers:
-                        unique_servers.add(ip_or_cname)
-                        if record_type == "CNAME":
-                            resolved_items.append(f"DOMAIN:{ip_or_cname}")
-                            resolved_items.extend(
-                                resolve_single(ip_or_cname, "A", udp_servers, doh_servers, depth + 1)
-                            )
-                            resolved_items.extend(
-                                resolve_single(ip_or_cname, "AAAA", udp_servers, doh_servers, depth + 1)
-                            )
+                try:
+                    answers = resolver.resolve(name, record_type)
+                    for rdata in answers:
+                        ip_or_cname = rdata.to_text().strip(".")
+                        if ip_or_cname not in unique_servers:
+                            unique_servers.add(ip_or_cname)
+                            if record_type == "CNAME":
+                                resolved_items.append(f"DOMAIN:{ip_or_cname}")
+                                resolved_items.extend(
+                                    resolve_single(ip_or_cname, "A", depth + 1)
+                                )
+                                resolved_items.extend(
+                                    resolve_single(ip_or_cname, "AAAA", depth + 1)
+                                )
 
-                        elif not is_private_ip(ip_or_cname):
-                            resolved_items.append(ip_or_cname)
-            except (
-                dns.resolver.NoAnswer,
-                dns.resolver.NXDOMAIN,
-                dns.resolver.NoNameservers,
-                dns.exception.Timeout,
-                dns.resolver.LifetimeTimeout,
-            ):
-                pass
-            except Exception as e:
-                print(f"Unexpected error resolving {domain} ({record_type}): {e}")
-                pass
+                            elif not is_private_ip(ip_or_cname):
+                                resolved_items.append(ip_or_cname)
+                except (
+                    dns.resolver.NoAnswer,
+                    dns.resolver.NXDOMAIN,
+                    dns.resolver.NoNameservers,
+                    dns.exception.Timeout,
+                    dns.resolver.LifetimeTimeout,
+                ):
+                    continue
+                except Exception as exc:
+                    udp_server_display = format_host_with_port(
+                        udp_server["host"], udp_server["port"]
+                    )
+                    logger.warning(
+                        "Unexpected error resolving %s (%s) via %s: %s",
+                        name,
+                        record_type,
+                        udp_server_display,
+                        exc,
+                    )
+                    continue
 
         for doh_url in doh_servers:
             try:
-                ips = resolve_doh(domain, doh_url, dns_servers, max_depth=max_depth - depth)
+                ips = resolve_doh(name, doh_url, max_depth=max_depth - depth)
                 for ip in ips:
                     if ip not in unique_servers:
                         unique_servers.add(ip)
                         if not is_private_ip(ip):
                             resolved_items.append(ip)
-            except Exception as e:
-                print(f"DoH resolution failed for {domain} via {doh_url}: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "DoH resolution failed for %s via %s: %s",
+                    name,
+                    doh_url,
+                    exc,
+                )
                 continue
-
 
         return resolved_items
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
-            executor.submit(resolve_single, domain, record_type, udp_servers, doh_servers, 0)
+            executor.submit(resolve_single, domain, record_type, 0)
             for record_type in ["A", "AAAA", "CNAME"]
         ]
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.extend(future.result())
-            except Exception as e:
-                print(f"Error in resolving future: {e}")
+            except Exception as exc:
+                logger.warning("Error while collecting DNS results for %s: %s", domain, exc)
 
     return results
 
@@ -421,8 +594,8 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
                             unique_servers.add(formatted_item)
                             all_results.append(formatted_item)
 
-            except Exception as e:
-                print(f"Error resolving {server}: {e}")
+            except Exception as exc:
+                logger.warning("Error resolving %s: %s", server, exc)
 
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
         filename = f.name
@@ -449,55 +622,49 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
 def upload_to_github(
     filename, repo_name, token, branch="main", path="", rename="yaml.list"
 ):
-
     g = Github(token)
-
     repo = g.get_repo(repo_name)
     file_path = posixpath.join(path, rename)
 
-    contents = None
+    contents: ContentFile | None = None
     file_exists = False
     try:
-        contents = repo.get_contents(file_path, ref=branch)
-        if isinstance(contents, list):
+        repo_contents = repo.get_contents(file_path, ref=branch)
+        if isinstance(repo_contents, list):
             raise ValueError(
                 f"Path '{file_path}' refers to a directory, please provide a file path"
             )
+        contents = repo_contents
         file_exists = True
-    except Exception as e:
-        if isinstance(e, ValueError):
-            raise e
-        if "Not Found" in str(e):
+    except ValueError:
+        raise
+    except Exception as exc:
+        if "Not Found" in str(exc):
             file_exists = False
         else:
-            raise e
+            raise
 
-    with open(filename, "r") as f:
-        file_content = f.read()
+    with open(filename, "r", encoding="utf-8") as file:
+        file_content = file.read()
 
     if file_exists:
         if contents is None:
             raise RuntimeError("Expected existing file contents but none were retrieved")
-        try:
-            repo.update_file(
-                contents.path,
-                "Update proxies.server list",
-                file_content,
-                contents.sha,
-                branch=branch,
-            )
-        except Exception as e:
-            raise e
-    else:
-        try:
-            repo.create_file(
-                file_path,
-                "Add proxies.server list",
-                file_content,
-                branch=branch,
-            )
-        except Exception as e:
-            raise e
+        repo.update_file(
+            contents.path,
+            f"Update {rename}",
+            file_content,
+            contents.sha,
+            branch=branch,
+        )
+        return
+
+    repo.create_file(
+        file_path,
+        f"Add {rename}",
+        file_content,
+        branch=branch,
+    )
 
 
 def process_yaml_with_js(yaml_file_path, js_file_path):
@@ -509,8 +676,8 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     ) as temp_processed_yaml:
         temp_processed_yaml_path = temp_processed_yaml.name
 
-    safe_yaml_path = yaml_file_path.replace('\\', '/')
-    safe_temp_path = temp_processed_yaml_path.replace('\\', '/')
+    safe_yaml_path = yaml_file_path.replace("\\", "/")
+    safe_temp_path = temp_processed_yaml_path.replace("\\", "/")
 
     node_script = f"""
     const fs = require('fs');
@@ -628,13 +795,17 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     try:
         subprocess.run(["node", temp_node_file_path], env=env, check=True)
         shutil.move(temp_processed_yaml_path, yaml_file_path)
-    except subprocess.CalledProcessError as e:
-        print(f"Error running node script: {e}")
-        raise e
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "Node script failed while processing %s with %s: %s",
+            yaml_file_path,
+            js_file_path,
+            exc,
+        )
+        raise
     finally:
-        os.remove(temp_node_file_path)
-        if os.path.exists(temp_processed_yaml_path):
-            os.remove(temp_processed_yaml_path)
+        remove_file(temp_node_file_path)
+        remove_file(temp_processed_yaml_path)
 
 
 @app.route("/", methods=["GET"])
@@ -646,77 +817,62 @@ def index():
 def listget():
     provided_api_key = request.args.get("api_key", "")
     source = request.args.get("source")
-    proxy = request.args.get("proxy", "")
     field = request.args.get("field", "proxies.server")
     repo = request.args.get("repo")
     token = request.args.get("token")
     branch = request.args.get("branch", "main")
     path = request.args.get("path", "")
     filename = request.args.get("filename", "yaml.list")
-    dns_servers_str = request.args.get("dns_servers")
+    dns_server_values = request.args.getlist("dns_servers")
     max_depth_str = request.args.get("max_depth", 8)
     resolve_domains = request.args.get("resolve_domains", "false").lower() == "true"
 
-    if API_KEYS:
-        if provided_api_key not in API_KEYS:
-            return jsonify({"error": "Invalid API key"}), 403
-
-    try:
-        max_depth = int(max_depth_str)
-    except ValueError:
-        max_depth = 8
+    if not is_authorized_request(provided_api_key):
+        return jsonify({"error": "Invalid API key"}), 403
 
     if not source:
         return jsonify({"error": "Missing source parameter"}), 400
 
-    try:
-        proxies = {}
-        if proxy:
-            if proxy.startswith("socks"):
-                proxies = {"http": proxy, "https": proxy}
-            elif proxy.startswith("http"):
-                proxies = {"http": proxy, "https": proxy}
-            else:
-                return jsonify({"error": "Invalid proxy format"}), 400
+    max_depth = parse_max_depth(max_depth_str)
 
+    try:
+        proxies = build_proxy_config(request.args.get("proxy", ""))
         temp_source_path = None
         try:
             temp_source_path = download_file(source, proxies=proxies)
-            with open(temp_source_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+            with open(temp_source_path, "r", encoding="utf-8") as file:
+                data = yaml.safe_load(file)
         except requests.exceptions.Timeout:
             return jsonify({"error": "Request timed out while fetching source"}), 408
         except requests.exceptions.SSLError:
             return jsonify({"error": "SSL verification failed"}), 495
-        except requests.exceptions.RequestException as e:
-            print(f"Network error while fetching source {source}: {e}")
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Network error while fetching source %s: %s", source, exc)
             return (
                 jsonify(
                     {
                         "error": "Network error while fetching source, please retry or provide a mirror URL",
-                        "detail": str(e),
+                        "detail": str(exc),
                     }
                 ),
                 502,
             )
-        except yaml.YAMLError as e:
-            return jsonify({"error": f"Invalid YAML format: {str(e)}"}), 400
-        except Exception as e:
-            return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        except yaml.YAMLError as exc:
+            return jsonify({"error": f"Invalid YAML format: {exc}"}), 400
+        except Exception as exc:
+            return jsonify({"error": f"Unexpected error: {exc}"}), 500
         finally:
-            if temp_source_path and os.path.exists(temp_source_path):
-                try:
-                    os.remove(temp_source_path)
-                except OSError:
-                    pass
-
-    except Exception as e:
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
-
+            remove_file(temp_source_path)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Unexpected error: {exc}"}), 500
 
     port_requested = field.endswith(".port")
     effective_field = field[: -len(".port")] if port_requested else field
-    server_port_map = extract_server_port_map(data, max_depth=max_depth) if port_requested else {}
+    server_port_map = (
+        extract_server_port_map(data, max_depth=max_depth) if port_requested else {}
+    )
 
     if resolve_domains:
         servers = extract_servers(data, effective_field, max_depth=max_depth)
@@ -740,15 +896,26 @@ def listget():
             )
 
     if resolve_domains:
-        if dns_servers_str:
-            dns_servers = dns_servers_str.split(",")
-        else:
-            dns_servers = ["223.5.5.5", "8.8.8.8"]
+        dns_servers = normalize_dns_server_entries(dns_server_values) or DEFAULT_DNS_SERVERS
+        current_dns_server = ""
 
-        for dns_server in dns_servers:
-            if is_doh_server(dns_server):
-                continue
-            socket.getaddrinfo(dns_server, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        try:
+            filter_doh_servers(dns_servers)
+            for dns_server in dns_servers:
+                current_dns_server = dns_server
+                if is_doh_server(dns_server):
+                    continue
+                parsed_dns_server = parse_udp_dns_server(dns_server)
+                socket.getaddrinfo(
+                    parsed_dns_server["host"],
+                    parsed_dns_server["port"],
+                    socket.AF_UNSPEC,
+                    socket.SOCK_DGRAM,
+                )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except socket.gaierror as exc:
+            return jsonify({"error": f"Invalid DNS server '{current_dns_server}': {exc}"}), 400
 
         temp_filename = generate_server_list(
             servers,
@@ -757,61 +924,51 @@ def listget():
             server_port_map=server_port_map if port_requested else None,
         )
     else:
-        temp_filename = tempfile.mktemp(suffix=".txt")
-        with open(temp_filename, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", delete=False, suffix=".txt", encoding="utf-8"
+        ) as file:
+            temp_filename = file.name
             for server in servers:
                 if port_requested:
                     ports = server_port_map.get(str(server), [])
                     for port in ports:
-                        f.write(f"{format_host_with_port(server, port)}\n")
+                        file.write(f"{format_host_with_port(server, port)}\n")
                 else:
-                    f.write(f"{server}\n")
+                    file.write(f"{server}\n")
 
-    try:
-        if repo and token:
-            try:
-                upload_to_github(temp_filename, repo, token, branch, path, filename)
-                return jsonify(
-                    {
-                        "message": f"File uploaded to GitHub successfully at {os.path.join(path, filename)}"
-                    }
-                )
-            except Exception as e:
-                return (
-                    jsonify({"error": f"Failed to upload to GitHub: {str(e)}"}),
-                    500,
-                )
-        else:
-            return send_file(temp_filename, as_attachment=True, download_name=filename)
-    finally:
-        os.remove(temp_filename)
+    if repo and token:
+        try:
+            upload_to_github(temp_filename, repo, token, branch, path, filename)
+            target_path = posixpath.join(path, filename) if path else filename
+            return jsonify(
+                {"message": f"Uploaded {filename} to {repo}@{branch}:{target_path}"}
+            )
+        except Exception as exc:
+            return (
+                jsonify({"error": f"Failed to upload to GitHub: {exc}"}),
+                500,
+            )
+        finally:
+            remove_file(temp_filename)
+
+    return send_download(temp_filename, filename)
 
 
 @app.route("/yamlprocess", methods=["GET"])
 def yamlprocess():
     provided_api_key = request.args.get("api_key", "")
     source_url = request.args.get("source")
-    proxy = request.args.get("proxy", "")
     merge_url = request.args.get("merge")
     filename = request.args.get("filename")
 
-    if API_KEYS:
-        if provided_api_key not in API_KEYS:
-            return jsonify({"error": "Invalid API key"}), 403
+    if not is_authorized_request(provided_api_key):
+        return jsonify({"error": "Invalid API key"}), 403
 
     if not source_url or not merge_url:
         return jsonify({"error": "Missing source or merge URL"}), 400
 
     try:
-        proxies = {}
-        if proxy:
-            if proxy.startswith("socks"):
-                proxies = {"http": proxy, "https": proxy}
-            elif proxy.startswith("http"):
-                proxies = {"http": proxy, "https": proxy}
-            else:
-                return jsonify({"error": "Invalid proxy format"}), 400
-
+        proxies = build_proxy_config(request.args.get("proxy", ""))
         temp_yaml_file_path = None
         temp_js_file_path = None
         try:
@@ -820,39 +977,35 @@ def yamlprocess():
 
             process_yaml_with_js(temp_yaml_file_path, temp_js_file_path)
 
-            download_filename = filename or os.path.basename(source_url)
-            return send_file(
-                temp_yaml_file_path, as_attachment=True, download_name=download_filename
+            download_filename = (
+                filename or os.path.basename(source_url) or "processed.yaml"
             )
+            response = send_download(temp_yaml_file_path, download_filename)
+            temp_yaml_file_path = None
+            return response
         finally:
-            if temp_js_file_path and os.path.exists(temp_js_file_path):
-                try:
-                    os.remove(temp_js_file_path)
-                except OSError:
-                    pass
-            if temp_yaml_file_path and os.path.exists(temp_yaml_file_path):
-                try:
-                    os.remove(temp_yaml_file_path)
-                except OSError:
-                    pass
+            remove_file(temp_js_file_path)
+            remove_file(temp_yaml_file_path)
 
     except requests.exceptions.Timeout:
         return jsonify({"error": "Request timed out while fetching files"}), 408
     except requests.exceptions.SSLError:
         return jsonify({"error": "SSL verification failed"}), 495
-    except requests.exceptions.RequestException as e:
-        print(f"Network error while fetching files: {e}")
+    except requests.exceptions.RequestException as exc:
+        logger.warning("Network error while fetching files: %s", exc)
         return (
             jsonify(
                 {
                     "error": "Network error while fetching files, please retry or provide a mirror URL",
-                    "detail": str(e),
+                    "detail": str(exc),
                 }
             ),
             502,
         )
-    except Exception as e:
-        return jsonify({"error": f"Error processing files: {e}"}), 500
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Error processing files: {exc}"}), 500
 
 
 if __name__ == "__main__":

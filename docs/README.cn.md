@@ -14,160 +14,181 @@
   <a href="https://github.com/somnifex/yamlforge/pulls"><img src="../assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
 </p>
 
-**YamlForge** 是一个轻量级的工具，用于从 YAML 配置文件中提取信息并使用 JavaScript 脚本进行处理。
+YamlForge 主要做两件事：从远程 YAML 里提取字段，或者在下载 YAML 后再跑一段 JavaScript 脚本继续处理。结果可以直接下载，也可以顺手推到 GitHub。
 
-## 特性
+## 它能做什么
 
-- **YAML 配置提取:** 从远程 YAML 文件中提取指定字段，生成 `.list` 文件。
-- **JavaScript 脚本处理:** 支持使用 JavaScript 脚本对 YAML 配置进行修改和合并。
-- **GitHub 集成:** 可将生成的 `.list` 文件自动上传到 GitHub 仓库。
-- **简易网页访问:** 提供一个简单的网页界面，方便用户进行配置和操作。
-- **稳健的下载:** 在网络不稳定时自动重试并校验下载完整性，减少失败。
+- 从远程 YAML 中提取字段，比如 `proxies.server`
+- 用 UDP DNS 或 DoH 解析域名
+- 对 YAML 执行一个 JavaScript `main(config)` 处理函数
+- 直接下载结果，或者把生成的文件上传到 GitHub
 
-## 使用指南--restart unless-stopped
+## 快速开始
 
-### 1. 部署
-
-#### Docker (推荐)
+### Docker
 
 ```bash
-docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key utopeadia/yamlforge:latest
+docker run -d --restart unless-stopped \
+  --name yamlforge \
+  -p 19527:19527 \
+  -e API_KEY=your_api_key \
+  utopeadia/yamlforge:latest
 ```
 
-`-e API_KEY=your_api_key`用于设置 API 密钥，可以使用逗号分隔多个 API 密钥，例如 -e API_KEY=key1,key2,key3。
+如果服务会暴露到公网，建议先设置 `API_KEY`。需要多个密钥时，可以用英文逗号分隔。
 
-#### 自行构建 Docker 镜像
+### 自己构建镜像
 
-1. 克隆仓库:
+1. 克隆仓库。
+
    ```bash
-   git clone https://github.com/somnifex/yamlforge.git
+   git clone https://github.com/somnifex/YamlForge.git
+   cd YamlForge
    ```
-2. 修改 `Dockerfile`
-   设置API_KEY
-3. 构建镜像:
+
+2. 构建镜像。
+
    ```bash
-   cd yamlforge
    docker build -t yamlforge .
    ```
-4. 运行容器:
+
+3. 运行容器。
+
    ```bash
-   docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key yamlforge
+   docker run -d --restart unless-stopped \
+     --name yamlforge \
+     -p 19527:19527 \
+     -e API_KEY=your_api_key \
+     yamlforge
    ```
 
-#### 直接运行 (Python 3.12)
+### 本地运行
 
-1. 克隆仓库:
+本地运行需要 Python 3.10+，同时机器上要能直接调用 Node.js。
+
+1. 克隆仓库。
+
    ```bash
-   git clone https://github.com/s0w0h/yamlforge.git
+   git clone https://github.com/somnifex/YamlForge.git
+   cd YamlForge
    ```
-2. 安装依赖:
+
+2. 安装 Python 依赖。
+
    ```bash
-   cd yamlforge
    pip install -r requirements.txt
-   npm install js-yaml iconv-lite
    ```
-3. 设置环境变量:
+
+3. 安装运行时需要的 Node 包。
+
+   ```bash
+   npm install -g js-yaml iconv-lite
+   ```
+
+4. 设置 API 密钥。
+
    ```bash
    export API_KEY=your_api_key
    ```
-4. 运行应用:
+
+5. 启动服务。
+
    ```bash
    python app.py
    ```
 
-### 2. API 接口
+启动后可以直接打开 `http://127.0.0.1:19527` 使用网页界面。
 
-应用运行后，可以通过以下 API 接口进行操作:
+## 接口概览
 
-- **`/listget`:** 提取 YAML 字段列表并生成 `.list` 文件。
-- **`/yamlprocess`:** 使用 JavaScript 脚本处理 YAML 配置。
+两个接口都通过查询参数传值。如果 `source` 或 `merge` 里包含 `?`、`&` 或非 ASCII 字符，记得先做 URL 编码。
 
-#### `/listget` 参数说明
+### `/listget`
 
-| 参数                | 说明                                                                             | 是否必需 | 默认值                |
-| ------------------- | -------------------------------------------------------------------------------- | -------- | --------------------- |
-| `api_key`         | API 密钥                                                                         | 是       |                       |
-| `source`          | YAML 文件的 URL，**注意，为了防止出现意想不到的问题，建议进行URL encode** | 是       |                       |
-| `proxy`           | 下载YAML文件使用的代理配置，格式: http://user:pass@host:port 或 socks5://host:port| 否       |                       |
-| `field`           | 需要提取的字段 (当 `resolve_domains` 为 `false` 时生效)，支持 `proxies.server` 或 `proxies.server.port` 以追加端口 | 否       | `proxies.server`    |
-| `repo`            | GitHub 仓库名称 (格式:`username/repo`)                                         | 否       |                       |
-| `token`           | GitHub 个人访问令牌                                                              | 否       |                       |
-| `branch`          | GitHub 分支名称                                                                  | 否       | `main`              |
-| `path`            | GitHub 仓库中的文件路径                                                          | 否       | 根目录                |
-| `filename`        | 生成的文件名                                                                     | 否       | `yaml.list`         |
-| `dns_servers`     | 用逗号分隔的 DNS 服务器列表 (当 `resolve_domains` 为 `true` 时生效)          | 否       | `223.5.5.5,8.8.8.8` |
-| `max_depth`       | 字段或域名解析解析的最大深度                                                     | 否       | `8`                 |
-| `resolve_domains` | 是否解析域名 (如果为 `true`，则会自动提取yaml配置中服务器地址并解析域名)       | 否       | `false`             |
+这个接口用来从 YAML 提取字段，并生成 `.list` 文件。
 
-**示例:**
+| 参数 | 说明 | 必填 | 默认值 |
+| --- | --- | --- | --- |
+| `api_key` | 用于鉴权的 API 密钥 | 是 |  |
+| `source` | YAML 文件地址 | 是 |  |
+| `proxy` | 下载代理，例如 `http://user:pass@host:port` 或 `socks5://host:port` | 否 |  |
+| `field` | 需要提取的 YAML 路径。若想把端口一起带上，可以传 `proxies.server.port`。 | 否 | `proxies.server` |
+| `repo` | GitHub 仓库名，格式为 `owner/repo` | 否 |  |
+| `token` | GitHub 个人访问令牌 | 否 |  |
+| `branch` | GitHub 分支 | 否 | `main` |
+| `path` | GitHub 仓库内的目标目录 | 否 | 仓库根目录 |
+| `filename` | 输出文件名 | 否 | `yaml.list` |
+| `dns_servers` | 逗号分隔的 DNS 或 DoH 列表。支持 `IP`、`host`、`IP:port`、`host:port`、`[IPv6]:port` 和 DoH URL，仅在 `resolve_domains=true` 时生效。 | 否 | `223.5.5.5,8.8.8.8` |
+| `max_depth` | 读取字段或解析域名时允许的最大深度 | 否 | `8` |
+| `resolve_domains` | 是否先解析提取到的域名，再写入结果文件 | 否 | `false` |
 
-```
-http://IP:PORT/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=YOUR_YAML_FIELD&repo=YOUR_REPO_NAME&token=YOUR_GITHUB_TOKEN&branch=YOUR_BRANCH_NAME&path=YOUR_PATH&filename=YOUR_FILE_NAME.list&dns_servers=223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8&max_depth=10&resolve_domains=true
-```
+示例：
 
-#### `/yamlprocess` 参数说明
-
-| 参数         | 说明                                                                                                  | 是否必需 | 默认值             |
-| ------------ | ----------------------------------------------------------------------------------------------------- | -------- | ------------------ |
-| `api_key`  | API 密钥                                                                                              | 是       |                    |
-| `source`   | 基础 YAML 配置文件的 URL，**注意，为了防止出现意想不到的问题，建议进行URL encode**             | 是       |                    |
-| `merge`    | 用于合并配置的 JavaScript 脚本的 URL，**注意，为了防止出现意想不到的问题，建议进行URL encode** | 是       |                    |
-| `filename` | 生成的文件名                                                                                          | 否       | 与 `source` 相同 |
-| `proxy`    | 下载文件使用的代理配置，格式: http://user:pass@host:port 或 socks5://host:port| 否       |                       |
-
-**示例:**
-
-```
-http://IP:PORT/yamlprocess?api_key=your_api_key&source=YOUR_BASE_YAML_URL&merge=YOUR_MERGE_JS_URL&filename=YOUR_FILE_NAME
+```text
+http://127.0.0.1:19527/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=proxies.server&filename=yaml.list
 ```
 
-#### JavaScript 脚本说明
+如果还需要解析域名，再补上 `resolve_domains=true`，必要时再传 `dns_servers=...`。
 
-JavaScript 脚本需要定义一个 `main` 函数，该函数接收一个 JSON 对象作为参数，并返回处理后的 JSON 对象。
+### `/yamlprocess`
 
-### 3. 简易网页访问
+这个接口会先下载 YAML，再执行一段 JavaScript 脚本处理内容。
 
-应用运行后，可以通过 `http://IP:19527` 访问一个简单的网页界面，实现了绝大部分功能。
+| 参数 | 说明 | 必填 | 默认值 |
+| --- | --- | --- | --- |
+| `api_key` | 用于鉴权的 API 密钥 | 是 |  |
+| `source` | 基础 YAML 文件地址 | 是 |  |
+| `merge` | JavaScript 处理脚本地址 | 是 |  |
+| `filename` | 输出文件名 | 否 | `source` 的文件名 |
+| `proxy` | 下载代理，例如 `http://user:pass@host:port` 或 `socks5://host:port` | 否 |  |
 
-## 环境变量 / 配置
+示例：
 
-应用的网络鲁棒性可以通过以下环境变量进行调整：
+```text
+http://127.0.0.1:19527/yamlprocess?api_key=your_api_key&source=YOUR_BASE_YAML_URL&merge=YOUR_MERGE_JS_URL&filename=processed.yaml
+```
 
-| 变量名 | 说明 | 默认值 |
-| :--- | :--- | :--- |
-| `API_KEY` | 允许的 API 密钥列表，用逗号分隔。 | `""` (空) |
-| `GUNICORN_TIMEOUT` | Gunicorn 工作进程超时时间（秒）。处理大文件或慢速操作时，请增加此值。 | `300` |
-| `DOWNLOAD_TIMEOUT` | 使用 `requests` 下载远程文件的超时时间（秒）。 | `600` |
-| `DNS_RESOLVER_TIMEOUT` | 单次 DNS 解析查询的超时时间（秒）。 | `5` |
-| `DNS_RESOLVER_LIFETIME` | DNS 解析尝试的总生存期（秒）。 | `10` |
-| `RETRY_BACKOFF_FACTOR` | 重试退避因子（线性延迟）。 | `1` |
-| `RETRY_TOTAL` | 网络请求的最大重试次数。 | `5` |
-| `MAX_WORKERS` | DNS 解析的并发线程数。 | `10` |
-| `DOWNLOAD_ATTEMPTS` | 下载远程文件的最大尝试次数（处理连接中断）。 | `5` |
-| `DOWNLOAD_RETRY_WAIT` | 下载重试间隔秒数（按尝试次数线性递增）。 | `2` |
+### JavaScript 脚本约定
 
-### 示例用法 (Docker)
+脚本里需要定义一个 `main` 函数。YamlForge 会把解析后的 YAML 对象传进去，再把 `main` 的返回值写回文件。
+
+## 运行时参数
+
+下面这些环境变量主要用来调整网络行为和生产环境下的容器配置。
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `API_KEY` | 允许访问接口的 API 密钥列表，多个值用英文逗号分隔 | `""` |
+| `GUNICORN_TIMEOUT` | Gunicorn worker 超时时间，单位秒 | `300` |
+| `GUNICORN_WORKERS` | Docker 镜像里 Gunicorn worker 数量 | `2` |
+| `DOWNLOAD_TIMEOUT` | 使用 `requests` 下载远程文件时的超时时间 | `600` |
+| `DNS_RESOLVER_TIMEOUT` | 单次 DNS 查询超时时间 | `5` |
+| `DNS_RESOLVER_LIFETIME` | 一次 DNS 解析尝试的总生命周期 | `10` |
+| `RETRY_BACKOFF_FACTOR` | 网络请求重试退避系数 | `1` |
+| `RETRY_TOTAL` | 网络请求最大重试次数 | `5` |
+| `MAX_WORKERS` | 并发解析 DNS 时使用的线程数 | `10` |
+| `DOWNLOAD_ATTEMPTS` | 单次下载任务的最大尝试次数 | `5` |
+| `DOWNLOAD_RETRY_WAIT` | 下载重试之间的基础等待时间 | `2` |
+
+示例：
 
 ```bash
 docker run -d -p 19527:19527 \
   -e API_KEY="your-secret-key" \
   -e GUNICORN_TIMEOUT=600 \
+  -e GUNICORN_WORKERS=4 \
   -e DOWNLOAD_TIMEOUT=1200 \
   -e MAX_WORKERS=20 \
   yamlforge:latest
 ```
 
-## 安全提示
+## 安全建议
 
-- 在公网部署时，强烈建议设置 API 密钥，防止 API 接口被滥用。
-- 在生产环境中使用 HTTPS 保护 API 通信。
-- 不要泄露 GitHub 个人访问令牌。
-- 建议自行部署 YamlForge，避免使用不明来源的转换网站，防止配置信息泄露。
+- 如果服务会暴露到公网，先设置 `API_KEY`。
+- 生产环境最好放在 HTTPS 之后。
+- GitHub 令牌尽量只给最小权限，也不要直接泄露到公开配置里。
+- 如果 YAML 内容比较敏感，最好自己部署，不要把数据交给来路不明的第三方实例。
 
-## 免责声明
+## 许可证
 
-本项目仅供学习和研究使用，请勿用于非法用途。
-
-## 许可协议
-
-[GPLv3](LICENSE)
+[GPLv3](../LICENSE)

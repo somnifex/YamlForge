@@ -14,161 +14,180 @@
   <a href="https://github.com/somnifex/yamlforge/pulls"><img src="assets/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
 </p>
 
-## YamlForge
+YamlForge pulls a remote YAML file, extracts the part you need, and returns the result as a downloadable file. If you want, it can also resolve domains, run a JavaScript transform, and upload the generated list to GitHub.
 
-**YamlForge** is a lightweight tool for extracting information from YAML configuration files and processing it using JavaScript scripts.
+## What it does
 
-## Features
+- Extract a field such as `proxies.server` from a remote YAML file
+- Resolve domains with UDP DNS servers or DoH endpoints
+- Run a JavaScript `main(config)` transform against a YAML file
+- Download the result directly or push it to GitHub
 
-- **YAML Configuration Extraction:** Extracts specified fields from remote YAML files and generates `.list` files.
-- **JavaScript Script Processing:** Supports modification and merging of YAML configurations using JavaScript scripts.
-- **GitHub Integration:** Automatically uploads generated `.list` files to a GitHub repository.
-- **Simple Web Interface:** Provides a simple web interface for user configuration and operation.
-- **Resilient Downloads:** Retries and detects partial downloads to better handle poor network conditions.
+## Quick start
 
-## Usage Guide
-
-### 1. Deployment
-
-#### Docker (Recommended)
+### Docker
 
 ```bash
-docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key utopeadia/yamlforge:latest
+docker run -d --restart unless-stopped \
+  --name yamlforge \
+  -p 19527:19527 \
+  -e API_KEY=your_api_key \
+  utopeadia/yamlforge:latest
 ```
 
-`-e API_KEY=your_api_key` is used to set the API key. Multiple API keys can be separated by commas, for example, `-e API_KEY=key1,key2,key3`.
+Set `API_KEY` if the service is reachable from a public network. Multiple keys can be passed as a comma-separated list.
 
-#### Building a Docker Image Manually
+### Build the image yourself
 
-1. Clone the repository:
+1. Clone the repository.
+
    ```bash
-   git clone https://github.com/s0w0h/yamlforge.git
+   git clone https://github.com/somnifex/YamlForge.git
+   cd YamlForge
    ```
-2. Modify `Dockerfile`
-   Set `API_KEY`
-3. Build the image:
+
+2. Build the image.
+
    ```bash
-   cd yamlforge
    docker build -t yamlforge .
    ```
-4. Run the container:
+
+3. Run the container.
+
    ```bash
-   docker run -d --restart unless-stopped --name yamlforge -p 19527:19527 -e API_KEY=your_api_key yamlforge
+   docker run -d --restart unless-stopped \
+     --name yamlforge \
+     -p 19527:19527 \
+     -e API_KEY=your_api_key \
+     yamlforge
    ```
 
-#### Running Directly (Python 3.9)
+### Run locally
 
-1. Clone the repository:
+YamlForge expects Python 3.10+ and Node.js in `PATH`.
+
+1. Clone the repository.
+
    ```bash
-   git clone https://github.com/somnifex/yamlforge.git
+   git clone https://github.com/somnifex/YamlForge.git
+   cd YamlForge
    ```
-2. Install dependencies:
+
+2. Install Python dependencies.
+
    ```bash
-   cd yamlforge
    pip install -r requirements.txt
-   npm install js-yaml iconv-lite
    ```
-3. Set environment variables:
+
+3. Install the Node packages used at runtime.
+
+   ```bash
+   npm install -g js-yaml iconv-lite
+   ```
+
+4. Set an API key.
+
    ```bash
    export API_KEY=your_api_key
    ```
-4. Run the application:
+
+5. Start the app.
+
    ```bash
    python app.py
    ```
 
-### 2. API Interface
+Open `http://127.0.0.1:19527` to use the web interface.
 
-After the application is running, you can use the following API interfaces for operations:
+## API overview
 
-- **`/listget`:** Extracts YAML field lists and generates `.list` files.
-- **`/yamlprocess`:** Processes YAML configurations using JavaScript scripts.
+Both endpoints use query parameters. If `source` or `merge` contains `?`, `&`, or non-ASCII characters, URL-encode it before sending the request.
 
-#### `/listget` Parameter Description
+### `/listget`
 
-| Parameter         | Description                                                                                                                                       | Required | Default Value       |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------- |
-| `api_key`         | API key                                                                                                                                           | Yes      |                     |
-| `source`          | URL of the YAML file, **Note: To prevent unexpected issues, it is recommended to URL encode the URL**                                             | Yes      |                     |
-| `proxy`           | Proxy configuration used for downloading the YAML file, format: http://user:pass@host:port or socks5://host:port                                  | No       |                     |
-| `field`           | Field to extract (effective when `resolve_domains` is `false`); supports `proxies.server` or `proxies.server.port` to append port values           | No       | `proxies.server`    |
-| `repo`            | GitHub repository name (format: `username/repo`)                                                                                                  | No       |                     |
-| `token`           | GitHub personal access token                                                                                                                      | No       |                     |
-| `branch`          | GitHub branch name                                                                                                                                | No       | `main`              |
-| `path`            | File path in the GitHub repository                                                                                                                | No       | Root directory      |
-| `filename`        | Generated file name                                                                                                                               | No       | `yaml.list`         |
-| `dns_servers`     | Comma-separated list of DNS servers (effective when `resolve_domains` is `true`)                                                                  | No       | `223.5.5.5,8.8.8.8` |
-| `max_depth`       | Maximum depth for field or domain name resolution                                                                                                 | No       | `8`                 |
-| `resolve_domains` | Whether to resolve domain names (if `true`, server addresses in the YAML configuration will be automatically extracted and domain names resolved) | No       | `false`             |
+Use this endpoint when you want a `.list` file from a YAML field.
 
-**Example:**
+| Parameter | Description | Required | Default |
+| --- | --- | --- | --- |
+| `api_key` | API key for authentication | Yes |  |
+| `source` | URL of the YAML file | Yes |  |
+| `proxy` | Download proxy, for example `http://user:pass@host:port` or `socks5://host:port` | No |  |
+| `field` | YAML path to extract. Use `proxies.server.port` if you want the server value with its port appended. | No | `proxies.server` |
+| `repo` | GitHub repository in `owner/repo` format | No |  |
+| `token` | GitHub personal access token | No |  |
+| `branch` | GitHub branch | No | `main` |
+| `path` | Target directory inside the GitHub repository | No | repository root |
+| `filename` | Output filename | No | `yaml.list` |
+| `dns_servers` | Comma-separated DNS servers or DoH URLs. Supports `IP`, `host`, `IP:port`, `host:port`, `[IPv6]:port`, and DoH URLs. Only used when `resolve_domains=true`. | No | `223.5.5.5,8.8.8.8` |
+| `max_depth` | Maximum traversal depth when reading fields or resolving domains | No | `8` |
+| `resolve_domains` | Resolve extracted domain names before writing the list | No | `false` |
 
-```
-http://IP:PORT/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=YOUR_YAML_FIELD&repo=YOUR_REPO_NAME&token=YOUR_GITHUB_TOKEN&branch=YOUR_BRANCH_NAME&path=YOUR_PATH&filename=YOUR_FILE_NAME.list&dns_servers=223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8&max_depth=10&resolve_domains=true
-```
+Example:
 
-#### `/yamlprocess` Parameter Description
-
-| Parameter  | Description                                                                                                                              | Required | Default Value    |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------- |
-| `api_key`  | API key                                                                                                                                  | Yes      |                  |
-| `source`   | URL of the base YAML configuration file, **Note: To prevent unexpected issues, it is recommended to URL encode the URL**                 | Yes      |                  |
-| `merge`    | URL of the JavaScript script for merging configurations, **Note: To prevent unexpected issues, it is recommended to URL encode the URL** | Yes      |                  |
-| `filename` | Generated file name                                                                                                                      | No       | Same as `source` |
-| `proxy`    | Proxy configuration used for downloading files, format: http://user:pass@host:port or socks5://host:port                                 | No       |                  |
-
-**Example:**
-
-```
-http://IP:PORT/yamlprocess?api_key=your_api_key&source=YOUR_BASE_YAML_URL&merge=YOUR_MERGE_JS_URL&filename=YOUR_FILE_NAME
+```text
+http://127.0.0.1:19527/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=proxies.server&filename=yaml.list
 ```
 
-#### JavaScript Script Description
+If you also want domain resolution, add `resolve_domains=true` and optionally `dns_servers=...`.
 
-The JavaScript script needs to define a `main` function that takes a JSON object as a parameter and returns the processed JSON object.
+### `/yamlprocess`
 
-### 3. Simple Web Interface
+Use this endpoint when you want to apply a JavaScript merge or transform script to a YAML file.
 
-After the application is running, you can access a simple web interface through `http://IP:19527`, which implements most of the functions.
+| Parameter | Description | Required | Default |
+| --- | --- | --- | --- |
+| `api_key` | API key for authentication | Yes |  |
+| `source` | URL of the base YAML file | Yes |  |
+| `merge` | URL of the JavaScript transform script | Yes |  |
+| `filename` | Output filename | No | source basename |
+| `proxy` | Download proxy, for example `http://user:pass@host:port` or `socks5://host:port` | No |  |
 
-## Environment Variables / Configuration
+Example:
 
-The application robustness can be tuned using the following environment variables:
+```text
+http://127.0.0.1:19527/yamlprocess?api_key=your_api_key&source=YOUR_BASE_YAML_URL&merge=YOUR_MERGE_JS_URL&filename=processed.yaml
+```
+
+### JavaScript transform contract
+
+Your script should define a `main` function. YamlForge passes the parsed YAML object into that function and expects the modified object back.
+
+## Runtime settings
+
+These environment variables are useful when you need to tune network behavior or the production container.
 
 | Variable | Description | Default |
-| :--- | :--- | :--- |
-| `API_KEY` | Comma-separated list of allowed API keys for authentication. | `""` (Empty) |
-| `GUNICORN_TIMEOUT` | Gunicorn worker timeout in seconds. Increase this for handling large files or slow operations. | `300` |
-| `DOWNLOAD_TIMEOUT` | Timeout in seconds for downloading remote files using `requests`. | `600` |
-| `DNS_RESOLVER_TIMEOUT` | Timeout in seconds for a single DNS resolution query. | `5` |
-| `DNS_RESOLVER_LIFETIME` | Total lifetime in seconds for a DNS resolution attempt. | `10` |
-| `RETRY_BACKOFF_FACTOR` | Backoff factor for retries (linear delay). | `1` |
-| `RETRY_TOTAL` | Maximum number of retries for network requests. | `5` |
-| `MAX_WORKERS` | Number of concurrent threads for DNS resolution. | `10` |
-| `DOWNLOAD_ATTEMPTS` | Maximum attempts for downloading a remote file (outer retry loop for broken connections). | `5` |
-| `DOWNLOAD_RETRY_WAIT` | Seconds to wait between download attempts (multiplied by the attempt number for gentle backoff). | `2` |
+| --- | --- | --- |
+| `API_KEY` | Comma-separated list of accepted API keys | `""` |
+| `GUNICORN_TIMEOUT` | Gunicorn worker timeout in seconds | `300` |
+| `GUNICORN_WORKERS` | Number of Gunicorn workers in the Docker image | `2` |
+| `DOWNLOAD_TIMEOUT` | Timeout for downloading remote files with `requests` | `600` |
+| `DNS_RESOLVER_TIMEOUT` | Timeout for a single DNS query | `5` |
+| `DNS_RESOLVER_LIFETIME` | Total lifetime of a DNS resolution attempt | `10` |
+| `RETRY_BACKOFF_FACTOR` | Retry backoff factor for network requests | `1` |
+| `RETRY_TOTAL` | Maximum retry count for network requests | `5` |
+| `MAX_WORKERS` | Number of concurrent DNS resolution workers | `10` |
+| `DOWNLOAD_ATTEMPTS` | Maximum attempts for one download job | `5` |
+| `DOWNLOAD_RETRY_WAIT` | Base wait time between download retries | `2` |
 
-### Example Usage (Docker)
+Example:
 
 ```bash
 docker run -d -p 19527:19527 \
   -e API_KEY="your-secret-key" \
   -e GUNICORN_TIMEOUT=600 \
+  -e GUNICORN_WORKERS=4 \
   -e DOWNLOAD_TIMEOUT=1200 \
   -e MAX_WORKERS=20 \
   yamlforge:latest
 ```
 
-## Security Tips
+## Security notes
 
-- When deploying on a public network, it is strongly recommended to set an API key to prevent API abuse.
-- Use HTTPS to protect API communication in a production environment.
-- Do not disclose your GitHub personal access token.
-- It is recommended to deploy YamlForge yourself and avoid using conversion websites from unknown sources to prevent configuration information leakage.
-
-## Disclaimer
-
-This project is for learning and research purposes only and should not be used for illegal purposes.
+- Set `API_KEY` before exposing the service to a public network.
+- Put the service behind HTTPS in production.
+- Keep GitHub personal access tokens private and scope them narrowly.
+- If the YAML data is sensitive, run your own instance instead of using an unknown third-party deployment.
 
 ## License
 
