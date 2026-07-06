@@ -22,4 +22,4 @@ ENV API_KEY=""
 ENV GUNICORN_TIMEOUT=300
 ENV GUNICORN_WORKERS=2
 
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:19527 --timeout ${GUNICORN_TIMEOUT} --workers ${GUNICORN_WORKERS} --preload --capture-output --log-level info app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:19527 --timeout ${GUNICORN_TIMEOUT} --workers ${GUNICORN_WORKERS} --preload --capture-output --log-level debug app:app"]
