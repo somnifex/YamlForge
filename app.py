@@ -685,20 +685,21 @@ def process_yaml_with_js(yaml_file_path, js_file_path):
     const yaml = require('js-yaml');
     const iconv = require('iconv-lite');
     const yamlRoot = path.dirname(require.resolve('js-yaml/package.json'));
-    function loadYamlInternal(...segments) {
-      try {
-        return require(path.join(yamlRoot, ...segments));
-      } catch (error) {
-      if (error && error.code === 'MODULE_NOT_FOUND') {
-          throw new Error(
-            `Unsupported js-yaml package layout at ${yamlRoot}. ` +
-            `YamlForge currently requires js-yaml 4.x because it uses js-yaml internal schema modules.`
-          );
-        }
-        throw error;
-      }
-    }
+    function loadYamlInternal(...segments) {{
+        try {{
+            return require(path.join(yamlRoot, ...segments));
+        }} catch (error) {{
+            if (error && error.code === 'MODULE_NOT_FOUND') {{
+            throw new Error(
+                `Unsupported js-yaml package layout at ${{yamlRoot}}. ` +
+                `YamlForge currently requires js-yaml 4.x because it uses js-yaml internal schema modules.`
+            );
+            }}
+            throw error;
+        }}
+    }}
     const loadYamlType = (typeName) => loadYamlInternal('lib', 'type', typeName);
+
     const common = loadYamlInternal('lib', 'common');
     const YAML_FLOAT_PATTERN = new RegExp(
         '^(?:[-+]?(?:[0-9][0-9_]*)\\\\.[0-9_]*(?:[eE][-+]?[0-9]+)?' +
