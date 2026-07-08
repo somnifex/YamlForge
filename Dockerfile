@@ -1,5 +1,6 @@
 FROM node:20-alpine AS node-builder
-RUN npm install -g js-yaml iconv-lite && rm -rf /root/.npm /tmp/*
+# RUN npm install -g js-yaml iconv-lite && rm -rf /root/.npm /tmp/*
+RUN npm install -g js-yaml@4.1.0 iconv-lite@0.6.3 && rm -rf /root/.npm /tmp/*
 
 FROM python:3.12-alpine
 
