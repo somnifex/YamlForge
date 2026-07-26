@@ -133,6 +133,9 @@ YamlForge queries A, AAAA, and CNAME records against every configured DNS server
 concurrently, follows every discovered CNAME target up to `max_depth`, and keeps the
 combined public IP and CNAME results. `MAX_WORKERS` limits the total number of DNS
 queries running at once for each request.
+Successful DNS responses, including empty answers, are cached in each worker process
+for a short period. An endpoint that repeatedly fails is temporarily skipped, and
+the number of submitted query futures is bounded independently from the input size.
 
 ### `/yamlprocess`
 
@@ -168,6 +171,11 @@ These environment variables are useful when you need to tune network behavior or
 | `DOWNLOAD_TIMEOUT` | Timeout for downloading remote files with `requests` | `600` |
 | `DNS_RESOLVER_TIMEOUT` | Timeout for a single DNS query | `5` |
 | `DNS_RESOLVER_LIFETIME` | Total lifetime of a DNS resolution attempt | `10` |
+| `DNS_MAX_PENDING` | Maximum submitted DNS futures per request | `MAX_WORKERS * 2` |
+| `DNS_FAILURE_THRESHOLD` | Consecutive endpoint failures before temporarily skipping it; `0` disables the circuit breaker | `3` |
+| `DNS_FAILURE_COOLDOWN` | Seconds before retrying a temporarily disabled DNS endpoint | `60` |
+| `DNS_CACHE_TTL` | Per-worker DNS response cache lifetime in seconds; `0` disables caching | `120` |
+| `DNS_CACHE_MAX_ENTRIES` | Maximum cached DNS query results per worker process | `10000` |
 | `RETRY_BACKOFF_FACTOR` | Retry backoff factor for network requests | `1` |
 | `RETRY_TOTAL` | Maximum retry count for network requests | `5` |
 | `MAX_WORKERS` | Number of concurrent DNS resolution workers | `10` |

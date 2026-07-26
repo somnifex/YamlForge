@@ -132,6 +132,8 @@ http://127.0.0.1:19527/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=p
 YamlForge 会并发查询每个已配置 DNS 的 A、AAAA 和 CNAME 记录，并在 `max_depth`
 范围内继续解析所有发现的 CNAME 目标，最终合并公网 IP 和 CNAME 结果。
 `MAX_WORKERS` 用于限制每个请求同时执行的 DNS 查询总数。
+成功的 DNS 响应（包括空响应）会在每个 worker 进程内短暂缓存；连续失败的端点会被
+暂时跳过，并且已提交的查询 Future 数量不会随输入规模无限增长。
 
 ### `/yamlprocess`
 
@@ -167,6 +169,11 @@ http://127.0.0.1:19527/yamlprocess?api_key=your_api_key&source=YOUR_BASE_YAML_UR
 | `DOWNLOAD_TIMEOUT` | 使用 `requests` 下载远程文件时的超时时间 | `600` |
 | `DNS_RESOLVER_TIMEOUT` | 单次 DNS 查询超时时间 | `5` |
 | `DNS_RESOLVER_LIFETIME` | 一次 DNS 解析尝试的总生命周期 | `10` |
+| `DNS_MAX_PENDING` | 每个请求最多已提交的 DNS Future 数量 | `MAX_WORKERS * 2` |
+| `DNS_FAILURE_THRESHOLD` | DNS 端点连续失败多少次后暂时跳过；设为 `0` 可关闭熔断 | `3` |
+| `DNS_FAILURE_COOLDOWN` | 暂时禁用 DNS 端点后等待多少秒再重试 | `60` |
+| `DNS_CACHE_TTL` | 每个 worker 的 DNS 响应缓存秒数；设为 `0` 可关闭缓存 | `120` |
+| `DNS_CACHE_MAX_ENTRIES` | 每个 worker 最多缓存的 DNS 查询结果数 | `10000` |
 | `RETRY_BACKOFF_FACTOR` | 网络请求重试退避系数 | `1` |
 | `RETRY_TOTAL` | 网络请求最大重试次数 | `5` |
 | `MAX_WORKERS` | 并发解析 DNS 时使用的线程数 | `10` |

@@ -11,6 +11,8 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
+from dataclasses import dataclass
 
 import dns.exception
 import dns.rdatatype
@@ -48,14 +50,16 @@ def resolve_doh(domain, doh_url, record_types=None, max_depth=8):
 
             cname_targets = set()
             for record_type in record_types:
-                ips, cnames = query_doh_records(
+                query_result = query_doh_records(
                     qname,
                     record_type,
                     doh_url,
                     session,
                 )
-                results.update(ip for ip in ips if not is_private_ip(ip))
-                cname_targets.update(cnames)
+                results.update(
+                    ip for ip in query_result.ips if not is_private_ip(ip)
+                )
+                cname_targets.update(query_result.cnames)
 
             queued_names.extend(
                 (target, depth + 1)
@@ -258,8 +262,142 @@ DNS_RESOLVER_LIFETIME = int(os.environ.get("DNS_RESOLVER_LIFETIME", 10))
 RETRY_BACKOFF_FACTOR = float(os.environ.get("RETRY_BACKOFF_FACTOR", 1))
 RETRY_TOTAL = int(os.environ.get("RETRY_TOTAL", 5))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 10))
+DNS_MAX_PENDING = int(os.environ.get("DNS_MAX_PENDING", MAX_WORKERS * 2))
+DNS_FAILURE_THRESHOLD = int(os.environ.get("DNS_FAILURE_THRESHOLD", 3))
+DNS_FAILURE_COOLDOWN = float(os.environ.get("DNS_FAILURE_COOLDOWN", 60))
+DNS_CACHE_TTL = float(os.environ.get("DNS_CACHE_TTL", 120))
+DNS_CACHE_MAX_ENTRIES = int(os.environ.get("DNS_CACHE_MAX_ENTRIES", 10000))
 DOWNLOAD_ATTEMPTS = int(os.environ.get("DOWNLOAD_ATTEMPTS", 5))
 DOWNLOAD_RETRY_WAIT = float(os.environ.get("DOWNLOAD_RETRY_WAIT", 2))
+
+
+@dataclass(frozen=True)
+class DnsQueryResult:
+    ips: frozenset
+    cnames: frozenset
+    status: str
+
+
+DNS_QUERY_SUCCESS = "success"
+DNS_QUERY_FAILURE = "failure"
+DNS_QUERY_SKIPPED = "skipped"
+
+_dns_cache = {}
+_dns_cache_lock = threading.Lock()
+_dns_endpoint_health = {}
+_dns_endpoint_health_lock = threading.Lock()
+
+
+def make_dns_query_result(ips=None, cnames=None, status=DNS_QUERY_SUCCESS):
+    return DnsQueryResult(
+        frozenset(ips or ()),
+        frozenset(cnames or ()),
+        status,
+    )
+
+
+def get_cached_dns_result(cache_key):
+    if DNS_CACHE_TTL <= 0 or DNS_CACHE_MAX_ENTRIES <= 0:
+        return None
+
+    now = time.monotonic()
+    with _dns_cache_lock:
+        cached = _dns_cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, result = cached
+        if expires_at <= now:
+            _dns_cache.pop(cache_key, None)
+            return None
+        return result
+
+
+def cache_dns_result(cache_key, result):
+    if (
+        result.status != DNS_QUERY_SUCCESS
+        or DNS_CACHE_TTL <= 0
+        or DNS_CACHE_MAX_ENTRIES <= 0
+    ):
+        return
+
+    now = time.monotonic()
+    expires_at = now + DNS_CACHE_TTL
+    with _dns_cache_lock:
+        _dns_cache.pop(cache_key, None)
+        if len(_dns_cache) >= DNS_CACHE_MAX_ENTRIES:
+            expired_keys = [
+                key
+                for key, (cached_expires_at, _) in _dns_cache.items()
+                if cached_expires_at <= now
+            ]
+            for key in expired_keys:
+                _dns_cache.pop(key, None)
+
+        while len(_dns_cache) >= DNS_CACHE_MAX_ENTRIES:
+            oldest_key = next(iter(_dns_cache))
+            _dns_cache.pop(oldest_key, None)
+
+        _dns_cache[cache_key] = (expires_at, result)
+
+
+def is_dns_endpoint_available(endpoint_key):
+    if DNS_FAILURE_THRESHOLD <= 0 or DNS_FAILURE_COOLDOWN <= 0:
+        return True
+
+    now = time.monotonic()
+    with _dns_endpoint_health_lock:
+        state = _dns_endpoint_health.get(endpoint_key)
+        if state is None:
+            return True
+        if state["disabled_until"] > now:
+            return False
+        if state["disabled_until"]:
+            state["failures"] = 0
+            state["disabled_until"] = 0
+        return True
+
+
+def record_dns_endpoint_result(endpoint_key, endpoint_display, status):
+    if (
+        status == DNS_QUERY_SKIPPED
+        or DNS_FAILURE_THRESHOLD <= 0
+        or DNS_FAILURE_COOLDOWN <= 0
+    ):
+        return
+
+    now = time.monotonic()
+    with _dns_endpoint_health_lock:
+        if status == DNS_QUERY_SUCCESS:
+            _dns_endpoint_health.pop(endpoint_key, None)
+            return
+
+        state = _dns_endpoint_health.setdefault(
+            endpoint_key,
+            {"failures": 0, "disabled_until": 0},
+        )
+
+        if state["disabled_until"] > now:
+            return
+
+        state["failures"] += 1
+        if state["failures"] < DNS_FAILURE_THRESHOLD:
+            return
+
+        state["disabled_until"] = now + max(0, DNS_FAILURE_COOLDOWN)
+        logger.warning(
+            "Temporarily disabling DNS endpoint %s after %s consecutive failures; "
+            "retrying in %.1fs",
+            endpoint_display,
+            state["failures"],
+            max(0, DNS_FAILURE_COOLDOWN),
+        )
+
+
+def clear_dns_runtime_state():
+    with _dns_cache_lock:
+        _dns_cache.clear()
+    with _dns_endpoint_health_lock:
+        _dns_endpoint_health.clear()
 
 
 def remove_file(path):
@@ -570,9 +708,10 @@ def query_udp_records(name, record_type, udp_server):
         resolver.lifetime = DNS_RESOLVER_LIFETIME
         resolver.timeout = DNS_RESOLVER_TIMEOUT
         answer = resolver.resolve(name, record_type)
-        return extract_dns_records(answer, record_type)
+        ips, cnames = extract_dns_records(answer, record_type)
+        return make_dns_query_result(ips, cnames)
     except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-        return set(), set()
+        return make_dns_query_result()
     except (
         dns.resolver.NoNameservers,
         dns.exception.Timeout,
@@ -586,7 +725,7 @@ def query_udp_records(name, record_type, udp_server):
             time.perf_counter() - started_at,
             exc,
         )
-        return set(), set()
+        return make_dns_query_result(status=DNS_QUERY_FAILURE)
     except Exception as exc:
         logger.warning(
             "Unexpected DNS error for %s (%s) via %s after %.3fs: %s",
@@ -596,7 +735,7 @@ def query_udp_records(name, record_type, udp_server):
             time.perf_counter() - started_at,
             exc,
         )
-        return set(), set()
+        return make_dns_query_result(status=DNS_QUERY_FAILURE)
 
 
 def query_doh_records(name, record_type, doh_url, session):
@@ -618,7 +757,7 @@ def query_doh_records(name, record_type, doh_url, session):
                 time.perf_counter() - started_at,
                 response.status_code,
             )
-            return set(), set()
+            return make_dns_query_result(status=DNS_QUERY_FAILURE)
 
         ips = set()
         cnames = set()
@@ -642,7 +781,7 @@ def query_doh_records(name, record_type, doh_url, session):
             elif record_number == 5:
                 cnames.add(value)
 
-        return ips, cnames
+        return make_dns_query_result(ips, cnames)
     except requests.exceptions.RequestException as exc:
         logger.warning(
             "DoH query failed for %s (%s) via %s after %.3fs: %s",
@@ -652,7 +791,7 @@ def query_doh_records(name, record_type, doh_url, session):
             time.perf_counter() - started_at,
             exc,
         )
-        return set(), set()
+        return make_dns_query_result(status=DNS_QUERY_FAILURE)
     except (AttributeError, TypeError, ValueError) as exc:
         logger.warning(
             "Invalid DoH response for %s (%s) via %s: %s",
@@ -661,7 +800,7 @@ def query_doh_records(name, record_type, doh_url, session):
             doh_url,
             exc,
         )
-        return set(), set()
+        return make_dns_query_result(status=DNS_QUERY_FAILURE)
 
 
 def resolve_domains_recursive(domains, dns_servers, max_depth=8):
@@ -678,6 +817,8 @@ def resolve_domains_recursive(domains, dns_servers, max_depth=8):
         }
         for root in roots
     }
+    pending_names = deque((root, root, 0) for root in roots)
+    queued_queries = deque()
     pending_futures = {}
     session_local = threading.local()
     created_sessions = []
@@ -692,41 +833,92 @@ def resolve_domains_recursive(domains, dns_servers, max_depth=8):
                 created_sessions.append(session)
         return session
 
-    def run_query(name, record_type, source_type, source):
+    def get_endpoint_identity(source_type, source):
         if source_type == "udp":
-            return query_udp_records(name, record_type, source)
-        return query_doh_records(name, record_type, source, get_doh_session())
+            display = format_host_with_port(source["host"], source["port"])
+            return ("udp", source["host"], source["port"]), display
+        return ("doh", source), source
 
-    def submit_name(executor, root, name, depth):
+    def run_query(name, record_type, source_type, source):
+        endpoint_key, endpoint_display = get_endpoint_identity(source_type, source)
+        cache_key = endpoint_key + (name.lower().rstrip("."), record_type)
+        cached_result = get_cached_dns_result(cache_key)
+        if cached_result is not None:
+            return cached_result
+
+        if not is_dns_endpoint_available(endpoint_key):
+            return make_dns_query_result(status=DNS_QUERY_SKIPPED)
+
+        if source_type == "udp":
+            result = query_udp_records(name, record_type, source)
+        else:
+            result = query_doh_records(
+                name,
+                record_type,
+                source,
+                get_doh_session(),
+            )
+
+        record_dns_endpoint_result(endpoint_key, endpoint_display, result.status)
+        cache_dns_result(cache_key, result)
+        return result
+
+    def queue_name_queries(root, name, depth):
         if depth >= max_depth:
             return
         for udp_server in udp_servers:
             for record_type in DNS_RECORD_TYPES:
-                future = executor.submit(
-                    run_query,
-                    name,
-                    record_type,
-                    "udp",
-                    udp_server,
+                queued_queries.append(
+                    (
+                        root,
+                        depth,
+                        name,
+                        record_type,
+                        "udp",
+                        udp_server,
+                    )
                 )
-                pending_futures[future] = (root, depth)
         for doh_url in doh_servers:
             for record_type in DNS_RECORD_TYPES:
-                future = executor.submit(
-                    run_query,
-                    name,
-                    record_type,
-                    "doh",
-                    doh_url,
+                queued_queries.append(
+                    (
+                        root,
+                        depth,
+                        name,
+                        record_type,
+                        "doh",
+                        doh_url,
+                    )
                 )
-                pending_futures[future] = (root, depth)
+
+    def fill_pending_futures(executor):
+        max_pending = max(1, DNS_MAX_PENDING)
+        while len(pending_futures) < max_pending:
+            if not queued_queries:
+                if not pending_names:
+                    break
+                root, name, depth = pending_names.popleft()
+                queue_name_queries(root, name, depth)
+                if not queued_queries:
+                    continue
+
+            root, depth, name, record_type, source_type, source = (
+                queued_queries.popleft()
+            )
+            future = executor.submit(
+                run_query,
+                name,
+                record_type,
+                source_type,
+                source,
+            )
+            pending_futures[future] = (root, depth)
 
     try:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, MAX_WORKERS)
         ) as executor:
-            for root in roots:
-                submit_name(executor, root, root, 0)
+            fill_pending_futures(executor)
 
             while pending_futures:
                 completed, _ = concurrent.futures.wait(
@@ -736,7 +928,7 @@ def resolve_domains_recursive(domains, dns_servers, max_depth=8):
                 for future in completed:
                     root, depth = pending_futures.pop(future)
                     try:
-                        ips, cnames = future.result()
+                        query_result = future.result()
                     except Exception as exc:
                         logger.warning(
                             "Error while collecting DNS results for %s: %s",
@@ -746,13 +938,13 @@ def resolve_domains_recursive(domains, dns_servers, max_depth=8):
                         continue
 
                     state = states[root]
-                    for ip in sorted(ips):
+                    for ip in sorted(query_result.ips):
                         if is_private_ip(ip) or ip in state["seen_results"]:
                             continue
                         state["seen_results"].add(ip)
                         state["results"].append(ip)
 
-                    for cname in sorted(cnames):
+                    for cname in sorted(query_result.cnames):
                         domain_item = f"DOMAIN:{cname}"
                         if domain_item not in state["seen_results"]:
                             state["seen_results"].add(domain_item)
@@ -763,7 +955,9 @@ def resolve_domains_recursive(domains, dns_servers, max_depth=8):
                             and depth + 1 < max_depth
                         ):
                             state["scheduled_names"].add(cname)
-                            submit_name(executor, root, cname, depth + 1)
+                            pending_names.append((root, cname, depth + 1))
+
+                fill_pending_futures(executor)
     finally:
         for session in created_sessions:
             session.close()
