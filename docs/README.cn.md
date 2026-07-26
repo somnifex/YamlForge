@@ -129,6 +129,9 @@ http://127.0.0.1:19527/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=p
 ```
 
 如果还需要解析域名，再补上 `resolve_domains=true`，必要时再传 `dns_servers=...`。
+YamlForge 会并发查询每个已配置 DNS 的 A、AAAA 和 CNAME 记录，并在 `max_depth`
+范围内继续解析所有发现的 CNAME 目标，最终合并公网 IP 和 CNAME 结果。
+`MAX_WORKERS` 用于限制每个请求同时执行的 DNS 查询总数。
 
 ### `/yamlprocess`
 

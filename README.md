@@ -129,6 +129,10 @@ http://127.0.0.1:19527/listget?api_key=your_api_key&source=YOUR_YAML_URL&field=p
 ```
 
 If you also want domain resolution, add `resolve_domains=true` and optionally `dns_servers=...`.
+YamlForge queries A, AAAA, and CNAME records against every configured DNS server
+concurrently, follows every discovered CNAME target up to `max_depth`, and keeps the
+combined public IP and CNAME results. `MAX_WORKERS` limits the total number of DNS
+queries running at once for each request.
 
 ### `/yamlprocess`
 

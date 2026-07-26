@@ -6,13 +6,14 @@ import os
 import posixpath
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 
 import dns.exception
+import dns.rdatatype
 import dns.resolver
 import requests
 import urllib3
@@ -27,57 +28,40 @@ logger = logging.getLogger(__name__)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+DNS_RECORD_TYPES = ("A", "AAAA", "CNAME")
+
 
 def resolve_doh(domain, doh_url, record_types=None, max_depth=8):
     if record_types is None:
-        record_types = ["A", "AAAA"]
+        record_types = DNS_RECORD_TYPES
 
     with requests.Session() as session:
-        def _query_single(qname, record_type, visited, depth=0):
-            if depth >= max_depth or qname in visited:
-                return set()
-            visited.add(qname)
+        results = set()
+        queued_names = [(domain, 0)]
+        visited_names = set()
 
-            ips = set()
-            cname_targets = []
+        while queued_names:
+            qname, depth = queued_names.pop(0)
+            if depth >= max_depth or qname in visited_names:
+                continue
+            visited_names.add(qname)
 
-            try:
-                response = session.get(
-                    doh_url,
-                    params={"name": qname, "type": record_type},
-                    headers={"Accept": "application/dns-json"},
-                    timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
-                    verify=False,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    for answer in data.get("Answer", []):
-                        rtype = answer.get("type")
-                        rdata = answer.get("data", "").rstrip(".")
-                        if rtype in (1, 28):
-                            if not is_private_ip(rdata):
-                                ips.add(rdata)
-                        elif rtype == 5 and rdata and rdata not in visited:
-                            cname_targets.append(rdata)
-            except Exception as exc:
-                logger.warning(
-                    "DoH query failed for %s (%s) via %s: %s",
+            cname_targets = set()
+            for record_type in record_types:
+                ips, cnames = query_doh_records(
                     qname,
                     record_type,
                     doh_url,
-                    exc,
+                    session,
                 )
-                return ips
+                results.update(ip for ip in ips if not is_private_ip(ip))
+                cname_targets.update(cnames)
 
-            if not ips:
-                for target in cname_targets:
-                    ips.update(_query_single(target, record_type, visited, depth + 1))
-
-            return ips
-
-        results = set()
-        for record_type in record_types:
-            results.update(_query_single(domain, record_type, set()))
+            queued_names.extend(
+                (target, depth + 1)
+                for target in cname_targets
+                if target not in visited_names
+            )
 
     return list(results)
 
@@ -186,6 +170,82 @@ def parse_udp_dns_server(server):
         port = parse_dns_server_port(port_part, candidate)
 
     return {"host": host, "port": port}
+
+
+def resolve_dns_server_hostname(host):
+    addresses = set()
+
+    def resolve_record_type(record_type):
+        try:
+            resolver = dns.resolver.Resolver()
+            resolver.lifetime = DNS_RESOLVER_LIFETIME
+            resolver.timeout = DNS_RESOLVER_TIMEOUT
+            return [
+                answer.to_text().strip(".")
+                for answer in resolver.resolve(host, record_type)
+            ]
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+            dns.exception.Timeout,
+            dns.resolver.LifetimeTimeout,
+        ):
+            return []
+        except (dns.exception.DNSException, OSError) as exc:
+            logger.warning(
+                "Failed to resolve DNS server hostname %s (%s): %s",
+                host,
+                record_type,
+                exc,
+            )
+            return []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(resolve_record_type, record_type)
+            for record_type in ("A", "AAAA")
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            addresses.update(future.result())
+
+    if not addresses:
+        raise ValueError(
+            f"Invalid DNS server '{host}': hostname could not be resolved."
+        )
+
+    return sorted(addresses)
+
+
+def prepare_dns_server_entries(servers):
+    prepared_servers = []
+    seen_servers = set()
+
+    for server in servers:
+        if is_doh_server(server):
+            candidates = [server]
+        else:
+            parsed_server = parse_udp_dns_server(server)
+            host = parsed_server["host"]
+            port = parsed_server["port"]
+
+            try:
+                addresses = [str(ipaddress.ip_address(host))]
+            except ValueError:
+                addresses = resolve_dns_server_hostname(host)
+
+            candidates = [
+                address if port == 53 else format_host_with_port(address, port)
+                for address in addresses
+            ]
+
+        for candidate in candidates:
+            if candidate not in seen_servers:
+                seen_servers.add(candidate)
+                prepared_servers.append(candidate)
+
+    return prepared_servers
+
 
 APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "yamlforge_temp")
 os.makedirs(APP_TEMP_DIR, exist_ok=True)
@@ -465,98 +525,257 @@ def is_private_ip(ip_address):
         return False
 
 
-def resolve_domain_recursive(domain, dns_servers, max_depth=8):
-    unique_servers = set()
-    results = []
-    doh_servers, udp_servers = filter_doh_servers(dns_servers)
+def extract_dns_records(answer, requested_type):
+    ips = set()
+    cnames = set()
+    response = getattr(answer, "response", None)
+    record_sets = getattr(response, "answer", None)
 
-    def resolve_single(name, record_type, depth):
-        if depth >= max_depth:
-            return []
-
-        resolved_items = []
-
-        if name not in unique_servers:
-            unique_servers.add(name)
-            resolved_items.append(f"DOMAIN:{name}")
-
-        if udp_servers:
-            for udp_server in udp_servers:
-                resolver = dns.resolver.Resolver()
-                resolver.nameservers = [udp_server["host"]]
-                resolver.port = udp_server["port"]
-                resolver.lifetime = DNS_RESOLVER_LIFETIME
-                resolver.timeout = DNS_RESOLVER_TIMEOUT
-
-                try:
-                    answers = resolver.resolve(name, record_type)
-                    for rdata in answers:
-                        ip_or_cname = rdata.to_text().strip(".")
-                        if ip_or_cname not in unique_servers:
-                            unique_servers.add(ip_or_cname)
-                            if record_type == "CNAME":
-                                resolved_items.append(f"DOMAIN:{ip_or_cname}")
-                                resolved_items.extend(
-                                    resolve_single(ip_or_cname, "A", depth + 1)
-                                )
-                                resolved_items.extend(
-                                    resolve_single(ip_or_cname, "AAAA", depth + 1)
-                                )
-
-                            elif not is_private_ip(ip_or_cname):
-                                resolved_items.append(ip_or_cname)
-                except (
-                    dns.resolver.NoAnswer,
-                    dns.resolver.NXDOMAIN,
-                    dns.resolver.NoNameservers,
-                    dns.exception.Timeout,
-                    dns.resolver.LifetimeTimeout,
-                ):
-                    continue
-                except Exception as exc:
-                    udp_server_display = format_host_with_port(
-                        udp_server["host"], udp_server["port"]
-                    )
-                    logger.warning(
-                        "Unexpected error resolving %s (%s) via %s: %s",
-                        name,
-                        record_type,
-                        udp_server_display,
-                        exc,
-                    )
-                    continue
-
-        for doh_url in doh_servers:
-            try:
-                ips = resolve_doh(name, doh_url, max_depth=max_depth - depth)
-                for ip in ips:
-                    if ip not in unique_servers:
-                        unique_servers.add(ip)
-                        if not is_private_ip(ip):
-                            resolved_items.append(ip)
-            except Exception as exc:
-                logger.warning(
-                    "DoH resolution failed for %s via %s: %s",
-                    name,
-                    doh_url,
-                    exc,
-                )
-                continue
-
-        return resolved_items
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [
-            executor.submit(resolve_single, domain, record_type, 0)
-            for record_type in ["A", "AAAA", "CNAME"]
+    if record_sets is None:
+        record_sets = [(requested_type, answer)]
+    else:
+        record_sets = [
+            (dns.rdatatype.to_text(record_set.rdtype), record_set)
+            for record_set in record_sets
         ]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results.extend(future.result())
-            except Exception as exc:
-                logger.warning("Error while collecting DNS results for %s: %s", domain, exc)
 
-    return results
+    for record_type, records in record_sets:
+        for record in records:
+            value = record.to_text().strip().strip('"').rstrip(".")
+            if not value:
+                continue
+            if record_type in ("A", "AAAA"):
+                try:
+                    ips.add(str(ipaddress.ip_address(value)))
+                except ValueError:
+                    logger.warning(
+                        "Ignoring invalid %s response value %r",
+                        record_type,
+                        value,
+                    )
+            elif record_type == "CNAME":
+                cnames.add(value)
+
+    return ips, cnames
+
+
+def query_udp_records(name, record_type, udp_server):
+    server_display = format_host_with_port(udp_server["host"], udp_server["port"])
+    started_at = time.perf_counter()
+
+    try:
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = [udp_server["host"]]
+        resolver.port = udp_server["port"]
+        resolver.lifetime = DNS_RESOLVER_LIFETIME
+        resolver.timeout = DNS_RESOLVER_TIMEOUT
+        answer = resolver.resolve(name, record_type)
+        return extract_dns_records(answer, record_type)
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        return set(), set()
+    except (
+        dns.resolver.NoNameservers,
+        dns.exception.Timeout,
+        dns.resolver.LifetimeTimeout,
+    ) as exc:
+        logger.warning(
+            "DNS query failed for %s (%s) via %s after %.3fs: %s",
+            name,
+            record_type,
+            server_display,
+            time.perf_counter() - started_at,
+            exc,
+        )
+        return set(), set()
+    except Exception as exc:
+        logger.warning(
+            "Unexpected DNS error for %s (%s) via %s after %.3fs: %s",
+            name,
+            record_type,
+            server_display,
+            time.perf_counter() - started_at,
+            exc,
+        )
+        return set(), set()
+
+
+def query_doh_records(name, record_type, doh_url, session):
+    started_at = time.perf_counter()
+    try:
+        response = session.get(
+            doh_url,
+            params={"name": name, "type": record_type},
+            headers={"Accept": "application/dns-json"},
+            timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+            verify=False,
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "DoH query failed for %s (%s) via %s after %.3fs: HTTP %s",
+                name,
+                record_type,
+                doh_url,
+                time.perf_counter() - started_at,
+                response.status_code,
+            )
+            return set(), set()
+
+        ips = set()
+        cnames = set()
+        for answer in response.json().get("Answer", []):
+            try:
+                record_number = int(answer.get("type"))
+            except (TypeError, ValueError):
+                continue
+            value = str(answer.get("data", "")).strip().strip('"').rstrip(".")
+            if not value:
+                continue
+            if record_number in (1, 28):
+                try:
+                    ips.add(str(ipaddress.ip_address(value)))
+                except ValueError:
+                    logger.warning(
+                        "Ignoring invalid DoH response value %r from %s",
+                        value,
+                        doh_url,
+                    )
+            elif record_number == 5:
+                cnames.add(value)
+
+        return ips, cnames
+    except requests.exceptions.RequestException as exc:
+        logger.warning(
+            "DoH query failed for %s (%s) via %s after %.3fs: %s",
+            name,
+            record_type,
+            doh_url,
+            time.perf_counter() - started_at,
+            exc,
+        )
+        return set(), set()
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Invalid DoH response for %s (%s) via %s: %s",
+            name,
+            record_type,
+            doh_url,
+            exc,
+        )
+        return set(), set()
+
+
+def resolve_domains_recursive(domains, dns_servers, max_depth=8):
+    roots = list(dict.fromkeys(str(domain) for domain in domains))
+    if not roots:
+        return {}
+
+    doh_servers, udp_servers = filter_doh_servers(dns_servers)
+    states = {
+        root: {
+            "results": [f"DOMAIN:{root}"],
+            "seen_results": {f"DOMAIN:{root}"},
+            "scheduled_names": {root},
+        }
+        for root in roots
+    }
+    pending_futures = {}
+    session_local = threading.local()
+    created_sessions = []
+    session_lock = threading.Lock()
+
+    def get_doh_session():
+        session = getattr(session_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session_local.session = session
+            with session_lock:
+                created_sessions.append(session)
+        return session
+
+    def run_query(name, record_type, source_type, source):
+        if source_type == "udp":
+            return query_udp_records(name, record_type, source)
+        return query_doh_records(name, record_type, source, get_doh_session())
+
+    def submit_name(executor, root, name, depth):
+        if depth >= max_depth:
+            return
+        for udp_server in udp_servers:
+            for record_type in DNS_RECORD_TYPES:
+                future = executor.submit(
+                    run_query,
+                    name,
+                    record_type,
+                    "udp",
+                    udp_server,
+                )
+                pending_futures[future] = (root, depth)
+        for doh_url in doh_servers:
+            for record_type in DNS_RECORD_TYPES:
+                future = executor.submit(
+                    run_query,
+                    name,
+                    record_type,
+                    "doh",
+                    doh_url,
+                )
+                pending_futures[future] = (root, depth)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, MAX_WORKERS)
+        ) as executor:
+            for root in roots:
+                submit_name(executor, root, root, 0)
+
+            while pending_futures:
+                completed, _ = concurrent.futures.wait(
+                    pending_futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in completed:
+                    root, depth = pending_futures.pop(future)
+                    try:
+                        ips, cnames = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "Error while collecting DNS results for %s: %s",
+                            root,
+                            exc,
+                        )
+                        continue
+
+                    state = states[root]
+                    for ip in sorted(ips):
+                        if is_private_ip(ip) or ip in state["seen_results"]:
+                            continue
+                        state["seen_results"].add(ip)
+                        state["results"].append(ip)
+
+                    for cname in sorted(cnames):
+                        domain_item = f"DOMAIN:{cname}"
+                        if domain_item not in state["seen_results"]:
+                            state["seen_results"].add(domain_item)
+                            state["results"].append(domain_item)
+
+                        if (
+                            cname not in state["scheduled_names"]
+                            and depth + 1 < max_depth
+                        ):
+                            state["scheduled_names"].add(cname)
+                            submit_name(executor, root, cname, depth + 1)
+    finally:
+        for session in created_sessions:
+            session.close()
+
+    return {root: state["results"] for root, state in states.items()}
+
+
+def resolve_domain_recursive(domain, dns_servers, max_depth=8):
+    return resolve_domains_recursive([domain], dns_servers, max_depth).get(
+        str(domain),
+        [],
+    )
 
 
 def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None):
@@ -573,29 +792,21 @@ def generate_server_list(servers, dns_servers, max_depth=8, server_port_map=None
 
         return [base_value]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_server = {
-            executor.submit(
-                resolve_domain_recursive, server, dns_servers, max_depth
-            ): server
-            for server in servers
-            if ":" not in server
-            and (not "." in server or not server.replace(".", "").isdigit())
-        }
+    domains = [
+        server
+        for server in servers
+        if ":" not in server
+        and (not "." in server or not server.replace(".", "").isdigit())
+    ]
+    resolved_domains = resolve_domains_recursive(domains, dns_servers, max_depth)
 
-        for future in concurrent.futures.as_completed(future_to_server):
-            server = future_to_server[future]
-            try:
-                results = future.result()
-                for item in results:
-                    formatted_items = format_output(item, server)
-                    for formatted_item in formatted_items:
-                        if formatted_item not in unique_servers:
-                            unique_servers.add(formatted_item)
-                            all_results.append(formatted_item)
-
-            except Exception as exc:
-                logger.warning("Error resolving %s: %s", server, exc)
+    for server in domains:
+        for item in resolved_domains.get(str(server), []):
+            formatted_items = format_output(item, server)
+            for formatted_item in formatted_items:
+                if formatted_item not in unique_servers:
+                    unique_servers.add(formatted_item)
+                    all_results.append(formatted_item)
 
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
         filename = f.name
@@ -911,25 +1122,11 @@ def listget():
 
     if resolve_domains:
         dns_servers = normalize_dns_server_entries(dns_server_values) or DEFAULT_DNS_SERVERS
-        current_dns_server = ""
 
         try:
-            filter_doh_servers(dns_servers)
-            for dns_server in dns_servers:
-                current_dns_server = dns_server
-                if is_doh_server(dns_server):
-                    continue
-                parsed_dns_server = parse_udp_dns_server(dns_server)
-                socket.getaddrinfo(
-                    parsed_dns_server["host"],
-                    parsed_dns_server["port"],
-                    socket.AF_UNSPEC,
-                    socket.SOCK_DGRAM,
-                )
+            dns_servers = prepare_dns_server_entries(dns_servers)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
-        except socket.gaierror as exc:
-            return jsonify({"error": f"Invalid DNS server '{current_dns_server}': {exc}"}), 400
 
         temp_filename = generate_server_list(
             servers,

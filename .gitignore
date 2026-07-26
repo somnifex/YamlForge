@@ -146,6 +146,9 @@ package-lock.json
 .idea/
 .history/
 
+# Local agent instructions
+/AGENTS.md
+
 # OS specific
 .DS_Store
 Thumbs.db
