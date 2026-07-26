@@ -134,6 +134,8 @@ YamlForge 会并发查询每个已配置 DNS 的 A、AAAA 和 CNAME 记录，并
 `MAX_WORKERS` 用于限制每个请求同时执行的 DNS 查询总数。
 成功的 DNS 响应（包括空响应）会在每个 worker 进程内短暂缓存；连续失败的端点会被
 暂时跳过，并且已提交的查询 Future 数量不会随输入规模无限增长。
+以 `/dns-query` 结尾的 DoH 地址使用 RFC 8484 二进制 POST 请求，以 `/resolve`
+结尾的地址使用 JSON GET API。
 
 ### `/yamlprocess`
 

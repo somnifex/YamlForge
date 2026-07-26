@@ -136,6 +136,8 @@ queries running at once for each request.
 Successful DNS responses, including empty answers, are cached in each worker process
 for a short period. An endpoint that repeatedly fails is temporarily skipped, and
 the number of submitted query futures is bounded independently from the input size.
+DoH URLs ending in `/dns-query` use RFC 8484 binary POST requests, while URLs ending
+in `/resolve` use the JSON GET API.
 
 ### `/yamlprocess`
 

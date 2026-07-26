@@ -13,8 +13,11 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import dns.exception
+import dns.message
+import dns.rcode
 import dns.rdatatype
 import dns.resolver
 import requests
@@ -279,6 +282,7 @@ class DnsQueryResult:
 
 
 DNS_QUERY_SUCCESS = "success"
+DNS_QUERY_UNCACHEABLE_SUCCESS = "uncacheable_success"
 DNS_QUERY_FAILURE = "failure"
 DNS_QUERY_SKIPPED = "skipped"
 
@@ -367,7 +371,7 @@ def record_dns_endpoint_result(endpoint_key, endpoint_display, status):
 
     now = time.monotonic()
     with _dns_endpoint_health_lock:
-        if status == DNS_QUERY_SUCCESS:
+        if status in (DNS_QUERY_SUCCESS, DNS_QUERY_UNCACHEABLE_SUCCESS):
             _dns_endpoint_health.pop(endpoint_key, None)
             return
 
@@ -663,22 +667,13 @@ def is_private_ip(ip_address):
         return False
 
 
-def extract_dns_records(answer, requested_type):
+def extract_dns_record_sets(record_sets):
     ips = set()
     cnames = set()
-    response = getattr(answer, "response", None)
-    record_sets = getattr(response, "answer", None)
 
-    if record_sets is None:
-        record_sets = [(requested_type, answer)]
-    else:
-        record_sets = [
-            (dns.rdatatype.to_text(record_set.rdtype), record_set)
-            for record_set in record_sets
-        ]
-
-    for record_type, records in record_sets:
-        for record in records:
+    for record_set in record_sets:
+        record_type = dns.rdatatype.to_text(record_set.rdtype)
+        for record in record_set:
             value = record.to_text().strip().strip('"').rstrip(".")
             if not value:
                 continue
@@ -693,6 +688,33 @@ def extract_dns_records(answer, requested_type):
                     )
             elif record_type == "CNAME":
                 cnames.add(value)
+
+    return ips, cnames
+
+
+def extract_dns_records(answer, requested_type):
+    response = getattr(answer, "response", None)
+    record_sets = getattr(response, "answer", None)
+    if record_sets is not None:
+        return extract_dns_record_sets(record_sets)
+
+    ips = set()
+    cnames = set()
+    for record in answer:
+        value = record.to_text().strip().strip('"').rstrip(".")
+        if not value:
+            continue
+        if requested_type in ("A", "AAAA"):
+            try:
+                ips.add(str(ipaddress.ip_address(value)))
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid %s response value %r",
+                    requested_type,
+                    value,
+                )
+        elif requested_type == "CNAME":
+            cnames.add(value)
 
     return ips, cnames
 
@@ -738,19 +760,87 @@ def query_udp_records(name, record_type, udp_server):
         return make_dns_query_result(status=DNS_QUERY_FAILURE)
 
 
+def is_doh_json_endpoint(doh_url):
+    return urlparse(doh_url).path.rstrip("/").endswith("/resolve")
+
+
+def parse_doh_json_response(response, doh_url):
+    payload = response.json()
+    dns_status = int(payload.get("Status", 0))
+    ips = set()
+    cnames = set()
+
+    for answer in payload.get("Answer", []):
+        try:
+            record_number = int(answer.get("type"))
+        except (TypeError, ValueError):
+            continue
+        value = str(answer.get("data", "")).strip().strip('"').rstrip(".")
+        if not value:
+            continue
+        if record_number in (1, 28):
+            try:
+                ips.add(str(ipaddress.ip_address(value)))
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid DoH response value %r from %s",
+                    value,
+                    doh_url,
+                )
+        elif record_number == 5:
+            cnames.add(value)
+
+    status = (
+        DNS_QUERY_SUCCESS
+        if dns_status in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN)
+        else DNS_QUERY_UNCACHEABLE_SUCCESS
+    )
+    return make_dns_query_result(ips, cnames, status)
+
+
+def parse_doh_wire_response(response):
+    dns_response = dns.message.from_wire(response.content)
+    ips, cnames = extract_dns_record_sets(dns_response.answer)
+    status = (
+        DNS_QUERY_SUCCESS
+        if dns_response.rcode() in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN)
+        else DNS_QUERY_UNCACHEABLE_SUCCESS
+    )
+    return make_dns_query_result(ips, cnames, status)
+
+
 def query_doh_records(name, record_type, doh_url, session):
     started_at = time.perf_counter()
+    protocol = "RFC 8484"
+
     try:
-        response = session.get(
-            doh_url,
-            params={"name": name, "type": record_type},
-            headers={"Accept": "application/dns-json"},
-            timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
-            verify=False,
-        )
+        use_json = is_doh_json_endpoint(doh_url)
+        protocol = "JSON" if use_json else "RFC 8484"
+        if use_json:
+            response = session.get(
+                doh_url,
+                params={"name": name, "type": record_type},
+                headers={"Accept": "application/dns-json"},
+                timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                verify=False,
+            )
+        else:
+            dns_query = dns.message.make_query(name, record_type)
+            response = session.post(
+                doh_url,
+                data=dns_query.to_wire(),
+                headers={
+                    "Accept": "application/dns-message",
+                    "Content-Type": "application/dns-message",
+                },
+                timeout=(DNS_RESOLVER_TIMEOUT, DNS_RESOLVER_LIFETIME),
+                verify=False,
+            )
+
         if response.status_code != 200:
             logger.warning(
-                "DoH query failed for %s (%s) via %s after %.3fs: HTTP %s",
+                "DoH %s query failed for %s (%s) via %s after %.3fs: HTTP %s",
+                protocol,
                 name,
                 record_type,
                 doh_url,
@@ -759,32 +849,13 @@ def query_doh_records(name, record_type, doh_url, session):
             )
             return make_dns_query_result(status=DNS_QUERY_FAILURE)
 
-        ips = set()
-        cnames = set()
-        for answer in response.json().get("Answer", []):
-            try:
-                record_number = int(answer.get("type"))
-            except (TypeError, ValueError):
-                continue
-            value = str(answer.get("data", "")).strip().strip('"').rstrip(".")
-            if not value:
-                continue
-            if record_number in (1, 28):
-                try:
-                    ips.add(str(ipaddress.ip_address(value)))
-                except ValueError:
-                    logger.warning(
-                        "Ignoring invalid DoH response value %r from %s",
-                        value,
-                        doh_url,
-                    )
-            elif record_number == 5:
-                cnames.add(value)
-
-        return make_dns_query_result(ips, cnames)
+        if use_json:
+            return parse_doh_json_response(response, doh_url)
+        return parse_doh_wire_response(response)
     except requests.exceptions.RequestException as exc:
         logger.warning(
-            "DoH query failed for %s (%s) via %s after %.3fs: %s",
+            "DoH %s query failed for %s (%s) via %s after %.3fs: %s",
+            protocol,
             name,
             record_type,
             doh_url,
@@ -792,9 +863,10 @@ def query_doh_records(name, record_type, doh_url, session):
             exc,
         )
         return make_dns_query_result(status=DNS_QUERY_FAILURE)
-    except (AttributeError, TypeError, ValueError) as exc:
+    except (dns.exception.DNSException, AttributeError, TypeError, ValueError) as exc:
         logger.warning(
-            "Invalid DoH response for %s (%s) via %s: %s",
+            "Invalid DoH %s response for %s (%s) via %s: %s",
+            protocol,
             name,
             record_type,
             doh_url,
